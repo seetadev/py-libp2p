@@ -1,6 +1,10 @@
-import trio
 import pytest
-from libp2p.core.quic import QuicProtocol, QuicConfiguration
+import trio
+
+from libp2p.core.quic import (
+    QuicConfiguration,
+    QuicProtocol,
+)
 
 
 @pytest.mark.trio
