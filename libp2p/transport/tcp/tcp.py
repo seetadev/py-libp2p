@@ -30,6 +30,8 @@ from libp2p.network.connection.raw_connection import (
 from libp2p.transport.exceptions import (
     OpenConnectionError,
 )
+from multiaddr.exceptions import ProtocolLookupError
+import socket
 
 logger = logging.getLogger("libp2p.transport.tcp")
 
@@ -88,7 +90,15 @@ class TCPListener(IListener):
             )
             return False
 
-        ip4_host_str = maddr.value_for_protocol("ip4")
+        # ip4_host_str = maddr.value_for_protocol("ip4")
+        host_str = None
+        try:
+            host_str = maddr.value_for_protocol("ip4")
+        except ProtocolLookupError:
+            pass
+
+        if host_str is None:
+            host_str = maddr.value_for_protocol("dns4")
         # For trio.serve_tcp, ip4_host_str (as host argument) can be None,
         # which typically means listen on all available interfaces.
 
@@ -96,7 +106,8 @@ class TCPListener(IListener):
             serve_tcp,
             handler,
             tcp_port,
-            ip4_host_str,
+            host_str,
+            # ip4_host_str,
         )
 
         if started_listeners is None:
@@ -128,7 +139,6 @@ class TCPListener(IListener):
             for listener in self.listeners:
                 nursery.start_soon(listener.aclose)
 
-
 class TCP(ITransport):
     async def dial(self, maddr: Multiaddr) -> IRawConnection:
         """
@@ -138,44 +148,46 @@ class TCP(ITransport):
         :return: `RawConnection` if successful
         :raise OpenConnectionError: raised when failed to open connection
         """
-        host_str = maddr.value_for_protocol("ip4")
-        port_str = maddr.value_for_protocol("tcp")
-
-        if host_str is None:
-            raise OpenConnectionError(
-                f"Failed to dial {maddr}: IP address not found in multiaddr."
-            )
-
-        if port_str is None:
-            raise OpenConnectionError(
-                f"Failed to dial {maddr}: TCP port not found in multiaddr."
-            )
-
         try:
-            port_int = int(port_str)
-        except ValueError:
-            raise OpenConnectionError(
-                f"Failed to dial {maddr}: Invalid TCP port '{port_str}'."
-            )
+            if "ip4" in maddr or "ip6" in maddr:
+                host_str = maddr.value_for_protocol("ip4") if "ip4" in maddr else maddr.value_for_protocol("ip6")
+            elif "dns4" in maddr or "dns6" in maddr:
+                host_str = maddr.value_for_protocol("dns4") if "dns4" in maddr else maddr.value_for_protocol("dns6")
+                try:
+                    host_str = await trio.to_thread.run_sync(lambda: socket.gethostbyname(host_str))
+                    # host_str = socket.gethostbyname(host_str)
+                except socket.gaierror as e:
+                    raise OpenConnectionError(f"DNS resolution failed for {host_str}: {e}")
+            else:
+                raise OpenConnectionError(f"Unsupported address: {maddr}")
+            
+            port_str = maddr.value_for_protocol("tcp")
+            if port_str is None:
+                raise OpenConnectionError(
+                    f"Failed to dial {maddr}: TCP port not found in multiaddr."
+                )
 
-        try:
-            # trio.open_tcp_stream requires host to be str or bytes, not None.
+            try:
+                port_int = int(port_str)
+            except ValueError:
+                raise OpenConnectionError(
+                    f"Failed to dial {maddr}: Invalid TCP port '{port_str}'."
+                )
+
+            # Connect using trio
             stream = await trio.open_tcp_stream(host_str, port_int)
+
         except OSError as error:
-            # OSError is common for network issues like "Connection refused"
-            # or "Host unreachable".
             raise OpenConnectionError(
                 f"Failed to open TCP stream to {maddr}: {error}"
             ) from error
         except Exception as error:
-            # Catch other potential errors from trio.open_tcp_stream and wrap them.
             raise OpenConnectionError(
                 f"An unexpected error occurred when dialing {maddr}: {error}"
             ) from error
 
         read_write_closer = TrioTCPStream(stream)
         return RawConnection(read_write_closer, True)
-
     def create_listener(self, handler_function: THandler) -> TCPListener:
         """
         Create listener on transport.
