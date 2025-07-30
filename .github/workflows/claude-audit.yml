@@ -17,9 +17,6 @@ on:
       - "*.ts"
       - "*.jsx"
       - "*.tsx"
-  schedule:
-    # Run every 6 hours starting from 12:00 AM UTC (00:00, 06:00, 12:00, 18:00)
-    - cron: "0 0,6,12,18 * * *"
   workflow_dispatch:
     inputs:
       include_security_scan:
