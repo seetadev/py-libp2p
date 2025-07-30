@@ -1,0 +1,848 @@
+name: Claude AI Security & Code Quality Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_security_scan:
+        description: "Include comprehensive security vulnerability scan"
+        required: false
+        default: true
+        type: boolean
+      include_dead_code_analysis:
+        description: "Include dead code and unused imports analysis"
+        required: false
+        default: true
+        type: boolean
+      include_refactor_suggestions:
+        description: "Include refactoring and optimization suggestions"
+        required: false
+        default: true
+        type: boolean
+      severity_threshold:
+        description: "Minimum severity level to report"
+        required: false
+        default: "minor"
+        type: choice
+        options:
+          - "critical"
+          - "major"
+          - "minor"
+          - "all"
+
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check and handle existing claude-audit branch
+        id: check-branch
+        run: |
+          if git ls-remote --heads origin claude-audit | grep -q claude-audit; then
+            echo "branch_exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️ Branch 'claude-audit' already exists!"
+            echo "🗑️ Automatically deleting existing branch..."
+            git push origin --delete claude-audit || echo "Branch deletion failed, but continuing..."
+            echo "✅ Existing branch deleted. Proceeding with audit generation."
+          else
+            echo "branch_exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Branch 'claude-audit' does not exist. Proceeding with audit generation."
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies and security tools
+        run: |
+          # Install Python dependencies
+          pip install boto3 requests botocore PyGithub bandit safety semgrep
+
+          # Install Node.js security tools
+          npm install -g audit-ci eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin
+          npm install -g retire depcheck npm-audit-resolver
+
+          # Install GitHub CLI as backup for PR creation
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
+
+          # Install additional security analysis tools
+          sudo apt install -y tree file cloc shellcheck
+
+      - name: Run comprehensive security and code analysis
+        run: |
+          echo "🔍 Running comprehensive security and code quality analysis..."
+
+          # Create output directory
+          mkdir -p audit_reports
+
+          # 1. Project structure analysis
+          echo "📁 Analyzing project structure..."
+          find . -type f \( \
+            -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" -o \
+            -name "*.py" -o -name "*.sql" -o -name "*.json" -o -name "*.yml" -o \
+            -name "*.yaml" -o -name "*.env*" -o -name "Dockerfile*" -o -name "*.sh" \
+          \) \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" \
+            -not -path "./dist/*" \
+            -not -path "./build/*" \
+            -not -path "./coverage/*" > audit_reports/all_files.txt
+
+          echo "📊 Found $(wc -l < audit_reports/all_files.txt) files to analyze"
+
+          # 2. Code statistics
+          echo "📈 Generating code statistics..."
+          cloc . --exclude-dir=node_modules,dist,build,coverage,.git --json > audit_reports/code_stats.json 2>/dev/null || echo "{}" > audit_reports/code_stats.json
+
+          # 3. Node.js dependency vulnerabilities
+          echo "🔒 Checking Node.js dependencies for vulnerabilities..."
+          if [ -f "package.json" ]; then
+            npm audit --json > audit_reports/npm_audit.json 2>/dev/null || echo "{}" > audit_reports/npm_audit.json
+            retire --outputformat json --outputpath audit_reports/retire_scan.json . 2>/dev/null || echo "{}" > audit_reports/retire_scan.json
+          else
+            echo "{}" > audit_reports/npm_audit.json
+            echo "{}" > audit_reports/retire_scan.json
+          fi
+
+          # 4. Python security analysis (if Python files exist)
+          echo "🐍 Running Python security analysis..."
+          if find . -name "*.py" -not -path "./node_modules/*" | head -1 | grep -q .; then
+            bandit -r . -f json -o audit_reports/bandit_report.json 2>/dev/null || echo "{}" > audit_reports/bandit_report.json
+            safety check --json > audit_reports/safety_report.json 2>/dev/null || echo "{}" > audit_reports/safety_report.json
+          else
+            echo "{}" > audit_reports/bandit_report.json
+            echo "{}" > audit_reports/safety_report.json
+          fi
+
+          # 5. Static code analysis with Semgrep
+          echo "🔍 Running Semgrep static analysis..."
+          semgrep --config=auto --json --output=audit_reports/semgrep_report.json . 2>/dev/null || echo "{}" > audit_reports/semgrep_report.json
+
+          # 6. ESLint analysis for JavaScript/TypeScript
+          echo "📝 Running ESLint analysis..."
+          if [ -f "package.json" ] && (find . -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" | head -1 | grep -q .); then
+            npx eslint . --ext .js,.jsx,.ts,.tsx --format json > audit_reports/eslint_report.json 2>/dev/null || echo "[]" > audit_reports/eslint_report.json
+          else
+            echo "[]" > audit_reports/eslint_report.json
+          fi
+
+          # 7. Dead code analysis
+          echo "💀 Analyzing dead code and unused dependencies..."
+          if [ -f "package.json" ]; then
+            depcheck --json > audit_reports/depcheck_report.json 2>/dev/null || echo "{}" > audit_reports/depcheck_report.json
+          else
+            echo "{}" > audit_reports/depcheck_report.json
+          fi
+
+          # 8. Shell script analysis
+          echo "🐚 Analyzing shell scripts..."
+          find . -name "*.sh" -not -path "./node_modules/*" -exec shellcheck -f json {} \; > audit_reports/shellcheck_report.json 2>/dev/null || echo "[]" > audit_reports/shellcheck_report.json
+
+          # 9. Docker security analysis
+          echo "🐳 Analyzing Docker security..."
+          if [ -f "Dockerfile" ] || [ -f "docker-compose.yml" ]; then
+            echo "Docker files found for analysis" > audit_reports/docker_analysis.txt
+            # Add basic Docker security checks
+            grep -r "ADD\|COPY\|RUN.*sudo\|USER.*root" Dockerfile* docker-compose.yml 2>/dev/null >> audit_reports/docker_analysis.txt || true
+          else
+            echo "No Docker files found" > audit_reports/docker_analysis.txt
+          fi
+
+          # 10. Environment and secrets analysis
+          echo "🔑 Analyzing environment files and potential secrets..."
+          find . -name ".env*" -o -name "*.env" | head -10 > audit_reports/env_files.txt
+          # Look for potential hardcoded secrets (basic patterns)
+          grep -r -i "password\|secret\|key\|token\|api_key" --include="*.js" --include="*.ts" --include="*.py" --include="*.json" . 2>/dev/null | head -50 > audit_reports/potential_secrets.txt || touch audit_reports/potential_secrets.txt
+
+          echo "✅ Security and code analysis completed!"
+
+      - name: Generate Security Audit Report with Claude AI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_BEDROCK_MODEL_ID: ${{ secrets.AWS_BEDROCK_MODEL_ID }}
+          INCLUDE_SECURITY_SCAN: ${{ github.event.inputs.include_security_scan }}
+          INCLUDE_DEAD_CODE_ANALYSIS: ${{ github.event.inputs.include_dead_code_analysis }}
+          INCLUDE_REFACTOR_SUGGESTIONS: ${{ github.event.inputs.include_refactor_suggestions }}
+          SEVERITY_THRESHOLD: ${{ github.event.inputs.severity_threshold }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          cat << 'EOF' > claude_audit_generator.py
+          import boto3
+          import json
+          import os
+          import subprocess
+          import time
+          import random
+          from datetime import datetime
+          from botocore.config import Config
+          from github import Github
+          import re
+
+          class ClaudeAuditGenerator:
+              def __init__(self):
+                  self.github_token = os.environ['GITHUB_TOKEN']
+                  self.bedrock_client = self.get_bedrock_client()
+                  self.model_id = os.environ.get('AWS_BEDROCK_MODEL_ID', 'us.anthropic.claude-3-5-sonnet-20241022-v2:0')
+                  self.include_security_scan = os.environ.get('INCLUDE_SECURITY_SCAN', 'true').lower() == 'true'
+                  self.include_dead_code_analysis = os.environ.get('INCLUDE_DEAD_CODE_ANALYSIS', 'true').lower() == 'true'
+                  self.include_refactor_suggestions = os.environ.get('INCLUDE_REFACTOR_SUGGESTIONS', 'true').lower() == 'true'
+                  self.severity_threshold = os.environ.get('SEVERITY_THRESHOLD', 'minor')
+                  self.repo_owner = os.environ['REPO_OWNER']
+                  self.repo_name = os.environ['REPO_NAME']
+                  self.target_branch = os.environ.get('TARGET_BRANCH', 'main')
+                  self.branch_name = "claude-audit"
+                  
+              def get_bedrock_client(self):
+                  config = Config(
+                      read_timeout=300,
+                      connect_timeout=10,
+                      retries={
+                          'max_attempts': 5,
+                          'mode': 'adaptive'
+                      }
+                  )
+                  return boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'], config=config)
+
+              def read_file_safely(self, filepath, max_lines=500):
+                  """Read file content safely, limiting lines for context"""
+                  try:
+                      with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                          lines = f.readlines()
+                          if len(lines) > max_lines:
+                              return ''.join(lines[:max_lines]) + f'\n... (truncated, {len(lines)-max_lines} more lines)'
+                          return ''.join(lines)
+                  except Exception as e:
+                      return f"Error reading file: {str(e)}"
+
+              def load_json_safely(self, filepath):
+                  """Load JSON file safely"""
+                  try:
+                      with open(filepath, 'r', encoding='utf-8') as f:
+                          return json.load(f)
+                  except Exception as e:
+                      print(f"Warning: Could not load {filepath}: {e}")
+                      return {}
+
+              def analyze_audit_data(self):
+                  """Analyze all security and code quality audit data"""
+                  print("📊 Analyzing audit data...")
+                  
+                  audit_data = {
+                      'npm_audit': {},
+                      'retire_scan': {},
+                      'bandit_report': {},
+                      'safety_report': {},
+                      'semgrep_report': {},
+                      'eslint_report': [],
+                      'depcheck_report': {},
+                      'shellcheck_report': [],
+                      'code_stats': {},
+                      'file_list': [],
+                      'docker_analysis': '',
+                      'potential_secrets': '',
+                      'env_files': []
+                  }
+                  
+                  # Load all audit reports
+                  if os.path.exists('audit_reports'):
+                      # Load JSON reports
+                      json_reports = [
+                          'npm_audit', 'retire_scan', 'bandit_report', 'safety_report',
+                          'semgrep_report', 'eslint_report', 'depcheck_report',
+                          'shellcheck_report', 'code_stats'
+                      ]
+                      
+                      for report in json_reports:
+                          filepath = f'audit_reports/{report}.json'
+                          if os.path.exists(filepath):
+                              audit_data[report] = self.load_json_safely(filepath)
+                      
+                      # Load text reports
+                      if os.path.exists('audit_reports/all_files.txt'):
+                          with open('audit_reports/all_files.txt', 'r') as f:
+                              audit_data['file_list'] = [line.strip() for line in f.readlines()]
+                      
+                      if os.path.exists('audit_reports/docker_analysis.txt'):
+                          audit_data['docker_analysis'] = self.read_file_safely('audit_reports/docker_analysis.txt', 100)
+                      
+                      if os.path.exists('audit_reports/potential_secrets.txt'):
+                          audit_data['potential_secrets'] = self.read_file_safely('audit_reports/potential_secrets.txt', 200)
+                      
+                      if os.path.exists('audit_reports/env_files.txt'):
+                          with open('audit_reports/env_files.txt', 'r') as f:
+                              audit_data['env_files'] = [line.strip() for line in f.readlines() if line.strip()]
+                  
+                  # Sample some source files for context
+                  source_files = {}
+                  key_patterns = [
+                      r'src/.*\.(tsx?|jsx?)$',
+                      r'.*\.(py)$',
+                      r'.*\.(sql)$',
+                      r'.*\.env.*$',
+                      r'Dockerfile.*$',
+                      r'docker-compose\.ya?ml$'
+                  ]
+                  
+                  sampled_files = []
+                  for pattern in key_patterns:
+                      for file_path in audit_data['file_list']:
+                          if re.search(pattern, file_path, re.IGNORECASE) and len(sampled_files) < 20:
+                              sampled_files.append(file_path)
+                  
+                  # Read content of sampled files
+                  for file_path in sampled_files[:15]:  # Limit to avoid token overflow
+                      if os.path.exists(file_path):
+                          source_files[file_path] = self.read_file_safely(file_path, 50)
+                  
+                  audit_data['source_files'] = source_files
+                  
+                  print(f"✅ Analyzed {len(audit_data['file_list'])} files and sampled {len(sampled_files)} for review")
+                  return audit_data
+
+              def generate_audit_report_with_claude(self, audit_data):
+                  """Generate comprehensive security audit report using Claude"""
+                  
+                  # Prepare comprehensive audit context
+                  npm_vulns = len(audit_data.get('npm_audit', {}).get('vulnerabilities', {}))
+                  retire_vulns = len(audit_data.get('retire_scan', []))
+                  bandit_issues = len(audit_data.get('bandit_report', {}).get('results', []))
+                  semgrep_findings = len(audit_data.get('semgrep_report', {}).get('results', []))
+                  eslint_issues = len(audit_data.get('eslint_report', []))
+                  
+                  audit_prompt = f"""
+          You are a senior security engineer and code quality expert. You need to create a comprehensive security and code quality audit report for a software project based on the provided analysis data.
+
+          ## PROJECT AUDIT DATA
+
+          **Repository:** {self.repo_owner}/{self.repo_name}
+          **Audit Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          **Severity Threshold:** {self.severity_threshold}
+
+          ### Vulnerability Summary
+          - NPM Vulnerabilities: {npm_vulns}
+          - Retired/Outdated Dependencies: {retire_vulns}
+          - Python Security Issues (Bandit): {bandit_issues}
+          - Static Analysis Findings (Semgrep): {semgrep_findings}
+          - ESLint Issues: {eslint_issues}
+
+          ### Code Statistics
+          {json.dumps(audit_data.get('code_stats', {}), indent=2)}
+
+          ### NPM Audit Results
+          {json.dumps(audit_data.get('npm_audit', {}), indent=2)[:3000]}
+
+          ### Retire.js Scan Results
+          {json.dumps(audit_data.get('retire_scan', []), indent=2)[:2000]}
+
+          ### Bandit Security Report (Python)
+          {json.dumps(audit_data.get('bandit_report', {}), indent=2)[:3000]}
+
+          ### Safety Report (Python Dependencies)
+          {json.dumps(audit_data.get('safety_report', {}), indent=2)[:2000]}
+
+          ### Semgrep Static Analysis
+          {json.dumps(audit_data.get('semgrep_report', {}), indent=2)[:4000]}
+
+          ### ESLint Report
+          {json.dumps(audit_data.get('eslint_report', []), indent=2)[:3000]}
+
+          ### Dead Code Analysis (depcheck)
+          {json.dumps(audit_data.get('depcheck_report', {}), indent=2)[:2000]}
+
+          ### ShellCheck Report
+          {json.dumps(audit_data.get('shellcheck_report', []), indent=2)[:1500]}
+
+          ### Docker Security Analysis
+          {audit_data.get('docker_analysis', 'No Docker analysis available')[:1000]}
+
+          ### Potential Secrets/Hardcoded Credentials
+          {audit_data.get('potential_secrets', 'No potential secrets found')[:2000]}
+
+          ### Environment Files
+          {audit_data.get('env_files', [])}
+
+          ### Sample Source Files
+          """
+                  
+                  # Add sample source files (limited to avoid token overflow)
+                  for file_path, content in list(audit_data.get('source_files', {}).items())[:8]:
+                      audit_prompt += f"\n**{file_path}:**\n```\n{content[:800]}\n```\n"
+                  
+                  audit_prompt += f"""
+
+          ## AUDIT REPORT GENERATION INSTRUCTIONS
+
+          Based on the provided security and code quality analysis data, create a comprehensive audit report. The report should be well-structured, actionable, and prioritized by severity.
+
+          **REQUIRED SECTIONS:**
+
+          # 🔒 Security & Code Quality Audit Report
+
+          **Repository:** {self.repo_owner}/{self.repo_name}  
+          **Audit Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
+          **Scope:** Comprehensive security and code quality analysis
+
+          ## 📊 Executive Summary
+
+          [Provide a high-level overview of findings, total issues by severity, and key recommendations]
+
+          ### Risk Assessment
+          - **Critical Issues:** [Count and brief description]
+          - **Major Issues:** [Count and brief description]  
+          - **Minor Issues:** [Count and brief description]
+          - **Overall Risk Level:** [Low/Medium/High/Critical]
+
+          ## 🚨 Critical Security Issues
+
+          [List all critical severity issues that need immediate attention]
+
+          ### 1. [Issue Title]
+          - **Severity:** Critical
+          - **Category:** [Security/Code Quality/Performance]
+          - **Description:** [Detailed description]
+          - **Impact:** [Potential impact]
+          - **Location:** [File/line references]
+          - **Remediation:** [Specific steps to fix]
+
+          ## ⚠️ Major Issues
+
+          [List major severity issues]
+
+          ### 1. [Issue Title]
+          - **Severity:** Major
+          - **Category:** [Category]
+          - **Description:** [Description]
+          - **Impact:** [Impact]
+          - **Location:** [Location]
+          - **Remediation:** [Remediation steps]
+
+          ## 🔍 Minor Issues & Improvements
+
+          [List minor issues and code quality improvements]
+
+          ## 💀 Dead Code Analysis
+
+          ### Unused Dependencies
+          [List unused npm packages that can be removed]
+
+          ### Unused Code
+          [Identify potentially unused functions, variables, or files]
+
+          ### Unused Imports
+          [List unused imports that should be cleaned up]
+
+          ## 🔄 Refactoring Suggestions
+
+          ### Code Quality Improvements
+          [Suggest specific refactoring opportunities]
+
+          ### Performance Optimizations
+          [Identify performance improvement opportunities]
+
+          ### Architecture Improvements
+          [Suggest architectural or design pattern improvements]
+
+          ## 🛡️ Security Recommendations
+
+          ### Vulnerability Remediation
+          [Prioritized list of security fixes]
+
+          ### Security Best Practices
+          [General security improvements and hardening]
+
+          ### Dependency Management
+          [Recommendations for dependency updates and management]
+
+          ## 🔧 Development Workflow Improvements
+
+          ### Static Analysis Integration
+          [Recommend tools and CI/CD integration]
+
+          ### Security Testing
+          [Recommend security testing practices]
+
+          ### Code Quality Gates
+          [Suggest quality gates and standards]
+
+          ## 📋 Action Items
+
+          ### Immediate Actions (Next 1-2 weeks)
+          1. [High priority action items]
+
+          ### Short-term Actions (Next month)
+          1. [Medium priority improvements]
+
+          ### Long-term Actions (Next quarter)
+          1. [Strategic improvements]
+
+          ## 📈 Metrics & Tracking
+
+          ### Current Status
+          - **Total Issues:** [Number]
+          - **Critical:** [Number]
+          - **Major:** [Number]
+          - **Minor:** [Number]
+
+          ### Progress Tracking
+          [Suggestions for tracking improvement progress]
+
+          ## 🔗 Resources & References
+
+          [Include links to security guides, best practices, and tools]
+
+          ---
+
+          ## IMPORTANT INSTRUCTIONS:
+
+          1. **Be Specific**: Provide exact file locations, line numbers when possible
+          2. **Actionable**: Every issue should have clear remediation steps
+          3. **Prioritized**: Order issues by severity and impact
+          4. **Evidence-Based**: Reference actual findings from the analysis tools
+          5. **Comprehensive**: Cover security, code quality, performance, and maintainability
+          6. **Professional**: Use clear, professional language suitable for technical teams
+          7. **Practical**: Focus on realistic, implementable recommendations
+
+          The report should be comprehensive enough that a development team can immediately act on the findings to improve their codebase security and quality.
+          """
+                  
+                  return self.generate_with_retry(audit_prompt)
+
+              def generate_with_retry(self, prompt, max_retries=10):
+                  """Generate audit report with retry logic"""
+                  print("🤖 Generating Security Audit Report with Claude AI...")
+                  print(f"📝 Prompt length: {len(prompt):,} characters")
+                  print(f"🎯 Using model: {self.model_id}")
+                  print("=" * 80)
+                  
+                  for attempt in range(max_retries):
+                      try:
+                          print(f"🚀 Attempt {attempt + 1}/{max_retries}")
+                          
+                          body = {
+                              "anthropic_version": "bedrock-2023-05-31",
+                              "max_tokens": 20000,
+                              "messages": [
+                                  {
+                                      "role": "user",
+                                      "content": prompt
+                                  }
+                              ]
+                          }
+                          
+                          start_time = time.time()
+                          response = self.bedrock_client.invoke_model(
+                              body=json.dumps(body),
+                              modelId=self.model_id,
+                              accept='application/json',
+                              contentType='application/json'
+                          )
+                          
+                          response_body = json.loads(response.get('body').read())
+                          audit_content = response_body['content'][0]['text']
+                          
+                          end_time = time.time()
+                          generation_time = end_time - start_time
+                          
+                          print(f"✅ Audit report generated in {generation_time:.2f} seconds!")
+                          print(f"📊 Content length: {len(audit_content):,} characters")
+                          print("=" * 80)
+                          
+                          return audit_content
+                          
+                      except Exception as e:
+                          error_str = str(e)
+                          print(f"❌ Attempt {attempt + 1} failed: {error_str}")
+                          
+                          if attempt < max_retries - 1:
+                              delay = min(2 ** attempt + random.uniform(0, 1), 60)
+                              print(f"⏳ Waiting {delay:.2f} seconds before retry...")
+                              time.sleep(delay)
+                          else:
+                              print("❌ All retry attempts exhausted")
+                              return None
+                  
+                  return None
+
+              def save_audit_report(self, audit_content):
+                  """Save audit report to the appropriate location"""
+                  print("💾 Saving Security Audit Report...")
+                  
+                  # Create .github/claude directory if it doesn't exist
+                  os.makedirs('.github/claude', exist_ok=True)
+                  
+                  # Save the audit report
+                  audit_file_path = '.github/claude/security-audit-report.md'
+                  with open(audit_file_path, 'w', encoding='utf-8') as f:
+                      f.write(audit_content)
+                  
+                  print(f"✅ Security Audit Report saved to {audit_file_path}")
+                  return audit_file_path
+
+              def create_branch_and_commit(self, audit_file_path):
+                  """Create branch and commit audit report"""
+                  try:
+                      print(f"🌿 Creating branch: {self.branch_name}")
+                      
+                      # Configure git
+                      subprocess.run(['git', 'config', 'user.name', 'Claude Security Auditor'], check=True)
+                      subprocess.run(['git', 'config', 'user.email', 'claude-audit@github-actions.bot'], check=True)
+                      
+                      # Create and checkout new branch
+                      subprocess.run(['git', 'checkout', '-b', self.branch_name], check=True)
+                      
+                      # Add the audit report
+                      subprocess.run(['git', 'add', audit_file_path], check=True)
+                      
+                      # Create commit message
+                      commit_msg = f"""🔒 Generate comprehensive Security & Code Quality Audit Report
+
+          Auto-generated security audit by Claude AI
+
+          Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          Report Location: {audit_file_path}
+
+          This audit includes:
+          🚨 Critical security vulnerabilities
+          ⚠️ Major code quality issues  
+          🔍 Minor improvements and optimizations
+          💀 Dead code and unused dependencies
+          🔄 Refactoring suggestions
+          🛡️ Security recommendations
+          """
+                      
+                      # Commit changes
+                      subprocess.run(['git', 'commit', '-m', commit_msg], check=True)
+                      
+                      # Push branch
+                      subprocess.run(['git', 'push', '-u', 'origin', self.branch_name], check=True)
+                      
+                      print(f"✅ Successfully pushed audit report to branch: {self.branch_name}")
+                      return True
+                      
+                  except subprocess.CalledProcessError as e:
+                      print(f"❌ Git operation failed: {e}")
+                      return False
+
+              def create_pull_request(self, audit_file_path):
+                  """Create pull request for audit report"""
+                  try:
+                      print("📝 Creating pull request...")
+                      
+                      github_client = Github(self.github_token)
+                      
+                      # Create PR in the current repository only
+                      target_repo_obj = github_client.get_repo(f"{self.repo_owner}/{self.repo_name}")
+                      head_ref = self.branch_name
+                      base_ref = self.target_branch
+                      print(f"📦 Creating PR: {head_ref} -> {base_ref}")
+                      
+                      pr_title = f"🔒 Security & Code Quality Audit Report - {datetime.now().strftime('%Y-%m-%d')}"
+                      
+                      pr_body = f"""# 🔒 Security & Code Quality Audit Report
+
+          This pull request contains a comprehensive security and code quality audit report automatically generated by Claude AI.
+
+          ## 📋 Audit Details
+          - **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          - **Location:** `{audit_file_path}`
+          - **Scope:** Complete security and code quality analysis
+          - **Severity Threshold:** {self.severity_threshold}
+
+          ## 🔍 Analysis Scope
+
+          ✅ **Security Vulnerabilities** - Comprehensive security scanning
+          ✅ **Dependency Vulnerabilities** - NPM/Python package security
+          ✅ **Static Code Analysis** - Code pattern and security analysis  
+          ✅ **Dead Code Detection** - Unused code and dependencies
+          ✅ **Code Quality Issues** - ESLint, style, and best practices
+          ✅ **Refactoring Opportunities** - Performance and maintainability
+          ✅ **Docker Security** - Container configuration analysis
+          ✅ **Secrets Detection** - Hardcoded credentials and sensitive data
+
+          ## 🚨 Key Findings Summary
+
+          The audit report includes categorized findings by severity:
+          - **Critical Issues:** Immediate security vulnerabilities requiring urgent attention
+          - **Major Issues:** Significant code quality and security concerns
+          - **Minor Issues:** Optimization opportunities and best practice improvements
+
+          ## 📈 Benefits
+
+          - **Enhanced Security:** Identify and remediate vulnerabilities
+          - **Improved Code Quality:** Better maintainability and readability
+          - **Performance Optimization:** Remove dead code and improve efficiency
+          - **Technical Debt Reduction:** Address anti-patterns and refactoring needs
+          - **Compliance:** Meet security and coding standards
+
+          ## 🔄 Next Steps
+
+          1. **Review** the detailed audit findings
+          2. **Prioritize** critical and major issues for immediate action
+          3. **Create** action items and assign to team members
+          4. **Track** progress using the provided metrics
+          5. **Implement** recommended security and quality improvements
+
+          ## ⚠️ Important Notes
+
+          - This is an automated analysis - please validate findings manually
+          - Some issues may be false positives requiring developer judgment
+          - Prioritize security vulnerabilities for immediate remediation
+          - Consider integrating recommended tools into your CI/CD pipeline
+
+          ---
+          *Generated automatically by Claude AI Security Auditor 🔒*
+          """
+                      
+                      # Try to create PR
+                      try:
+                          pull_request = target_repo_obj.create_pull(
+                              title=pr_title,
+                              body=pr_body,
+                              head=head_ref,
+                              base=base_ref
+                          )
+                          
+                          # Add labels
+                          try:
+                              pull_request.add_to_labels('security', 'audit', 'code-quality', 'claude-generated')
+                          except:
+                              pass  # Labels might not exist
+                          
+                          print(f"✅ Pull request created: {pull_request.html_url}")
+                          return pull_request.html_url
+                      except Exception as pr_error:
+                          if "not permitted" in str(pr_error) or "403" in str(pr_error):
+                              print("⚠️ GitHub Actions cannot create PRs directly. Using GitHub CLI fallback...")
+                              
+                              # Try using GitHub CLI
+                              try:
+                                  cli_args = [
+                                      'gh', 'pr', 'create',
+                                      '--title', pr_title,
+                                      '--body', pr_body,
+                                      '--head', head_ref,
+                                      '--base', base_ref
+                                  ]
+                                  
+                                  result = subprocess.run(cli_args, capture_output=True, text=True, check=True)
+                                  
+                                  pr_url = result.stdout.strip()
+                                  print(f"✅ Pull request created via GitHub CLI: {pr_url}")
+                                  return pr_url
+                              except subprocess.CalledProcessError as cli_error:
+                                  print(f"❌ GitHub CLI also failed: {cli_error}")
+                                  return None
+                          else:
+                              raise pr_error
+                      
+                  except Exception as e:
+                      print(f"❌ Failed to create pull request: {e}")
+                      return None
+
+              def run_audit(self):
+                  """Main audit execution method"""
+                  print("🔒 Starting Claude AI Security & Code Quality Audit...")
+                  print(f"🔍 Security scan: {self.include_security_scan}")
+                  print(f"💀 Dead code analysis: {self.include_dead_code_analysis}")
+                  print(f"🔄 Refactor suggestions: {self.include_refactor_suggestions}")
+                  print(f"⚠️ Severity threshold: {self.severity_threshold}")
+                  print("=" * 80)
+                  
+                  # Step 1: Analyze audit data
+                  audit_data = self.analyze_audit_data()
+                  
+                  # Step 2: Generate audit report with Claude
+                  audit_content = self.generate_audit_report_with_claude(audit_data)
+                  
+                  if not audit_content:
+                      print("❌ Failed to generate audit report")
+                      return False
+                  
+                  # Step 3: Save audit report
+                  audit_file_path = self.save_audit_report(audit_content)
+                  
+                  # Step 4: Create branch and commit
+                  if self.create_branch_and_commit(audit_file_path):
+                      # Step 5: Create pull request
+                      pr_url = self.create_pull_request(audit_file_path)
+                      
+                      if pr_url:
+                          print("=" * 80)
+                          print("🎉 Security audit completed successfully!")
+                          print(f"📄 Audit Report: {audit_file_path}")
+                          print(f"🔗 Pull Request: {pr_url}")
+                          print("=" * 80)
+                          return True
+                      else:
+                          print("=" * 80)
+                          print("🎉 Security audit completed successfully!")
+                          print(f"📄 Audit Report: {audit_file_path}")
+                          print(f"🌿 Branch: {self.branch_name}")
+                          print("💡 Create a pull request manually from the GitHub interface")
+                          print("=" * 80)
+                          return True
+                  else:
+                      print("❌ Failed to create branch and commit audit report")
+                      return False
+
+          if __name__ == "__main__":
+              auditor = ClaudeAuditGenerator()
+              success = auditor.run_audit()
+              exit(0 if success else 1)
+          EOF
+
+          python claude_audit_generator.py
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "🔒 Claude AI Security & Code Quality Audit Summary"
+          echo "================================================="
+          echo "Security Scan: ${{ github.event.inputs.include_security_scan }}"
+          echo "Dead Code Analysis: ${{ github.event.inputs.include_dead_code_analysis }}"
+          echo "Refactor Suggestions: ${{ github.event.inputs.include_refactor_suggestions }}"
+          echo "Severity Threshold: ${{ github.event.inputs.severity_threshold }}"
+          echo "Branch: claude-audit"
+          echo "Report Location: .github/claude/security-audit-report.md"
+          echo ""
+          echo "🔍 The audit report includes:"
+          echo "  🚨 Critical security vulnerabilities"
+          echo "  ⚠️ Major code quality issues"
+          echo "  🔍 Minor improvements and optimizations"
+          echo "  💀 Dead code and unused dependencies"
+          echo "  🔄 Refactoring suggestions"
+          echo "  🛡️ Security recommendations"
+          echo "  📋 Prioritized action items"
+          echo ""
+          echo "📄 Check the pull request for the comprehensive security audit report!"

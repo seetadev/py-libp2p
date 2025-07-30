@@ -1,0 +1,1281 @@
+name: Claude AI Test Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: "Type of tests to generate"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - unit
+          - integration
+          - e2e
+          - component
+      test_framework:
+        description: "Preferred testing framework"
+        required: false
+        default: "auto-detect"
+        type: choice
+        options:
+          - auto-detect
+          - jest
+          - vitest
+          - cypress
+          - playwright
+      include_test_readme:
+        description: "Generate README for tests"
+        required: false
+        default: true
+        type: boolean
+      coverage_target:
+        description: "Target test coverage percentage"
+        required: false
+        default: "80"
+        type: string
+
+jobs:
+  generate-tests:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check and handle existing claude-test branch
+        id: check-branch
+        run: |
+          if git ls-remote --heads origin claude-test | grep -q claude-test; then
+            echo "branch_exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️ Branch 'claude-test' already exists!"
+            echo "🗑️ Automatically deleting existing branch..."
+            git push origin --delete claude-test || echo "Branch deletion failed, but continuing..."
+            echo "✅ Existing branch deleted. Proceeding with test generation."
+          else
+            echo "branch_exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Branch 'claude-test' does not exist. Proceeding with test generation."
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          # Install Python dependencies
+          pip install boto3 requests botocore PyGithub
+
+          # Install GitHub CLI as backup for PR creation
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
+
+          # Install additional tools for analysis
+          sudo apt install -y tree file
+
+          # Try to install npm dependencies to understand project better
+          npm install || echo "npm install failed, but continuing with analysis"
+
+      - name: Analyze project for test generation
+        run: |
+          echo "🔍 Analyzing project structure for test generation..."
+
+          # Create comprehensive file inventory for testing
+          find . -type f \( \
+            -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.jsx" \
+          \) \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" \
+            -not -path "./dist/*" \
+            -not -path "./build/*" \
+            -not -path "./coverage/*" \
+            -not -path "./.github/*" > source_files.txt
+
+          echo "📁 Found $(wc -l < source_files.txt) source files to analyze for testing"
+
+          # Find existing test files
+          find . -type f \( \
+            -name "*.test.ts" -o -name "*.test.tsx" -o -name "*.test.js" -o -name "*.test.jsx" -o \
+            -name "*.spec.ts" -o -name "*.spec.tsx" -o -name "*.spec.js" -o -name "*.spec.jsx" -o \
+            -name "*.e2e.ts" -o -name "*.e2e.js" -o -name "*cy.ts" -o -name "*cy.js" \
+          \) \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" > existing_tests.txt
+
+          echo "🧪 Found $(wc -l < existing_tests.txt) existing test files"
+
+          # Generate project structure for testing context
+          echo "Project Structure for Testing:" > test_project_structure.txt
+          echo "==============================" >> test_project_structure.txt
+          tree -I 'node_modules|.git|dist|build|coverage|.next' -L 4 >> test_project_structure.txt 2>/dev/null || find . -type d -not -path "./node_modules*" -not -path "./.git*" | head -30 >> test_project_structure.txt
+
+          # Analyze testing configuration and dependencies
+          echo "Testing Configuration Analysis:" > test_config_analysis.txt
+          echo "===============================" >> test_config_analysis.txt
+
+          # Check for existing test configurations
+          test_configs=(
+            "jest.config.js"
+            "jest.config.ts"
+            "vitest.config.ts"
+            "vitest.config.js"
+            "cypress.config.ts"
+            "cypress.config.js"
+            "playwright.config.ts"
+            "playwright.config.js"
+            ".eslintrc.json"
+            "tsconfig.json"
+            "package.json"
+          )
+
+          for config in "${test_configs[@]}"; do
+            if [ -f "$config" ]; then
+              echo "=== $config ===" >> test_config_analysis.txt
+              head -100 "$config" >> test_config_analysis.txt
+              echo "" >> test_config_analysis.txt
+            fi
+          done
+
+          # Analyze source code patterns for test generation
+          echo "Source Code Analysis for Testing:" > source_code_patterns.txt
+          echo "==================================" >> source_code_patterns.txt
+
+          # Count different types of files that need testing
+          echo "Components to test:" >> source_code_patterns.txt
+          echo "React Components: $(find . -name "*.tsx" -not -path "./node_modules/*" | wc -l)" >> source_code_patterns.txt
+          echo "TypeScript files: $(find . -name "*.ts" -not -path "./node_modules/*" -not -name "*.test.*" -not -name "*.spec.*" | wc -l)" >> source_code_patterns.txt
+          echo "JavaScript files: $(find . -name "*.js" -not -path "./node_modules/*" -not -name "*.test.*" -not -name "*.spec.*" | wc -l)" >> source_code_patterns.txt
+          echo "Services/Utils: $(find . -path "*/services/*" -o -path "*/utils/*" -o -path "*/helpers/*" | grep -E '\.(ts|js)$' | wc -l)" >> source_code_patterns.txt
+          echo "Hooks: $(find . -name "*hook*" -o -name "*Hook*" | grep -E '\.(ts|tsx)$' | wc -l)" >> source_code_patterns.txt
+          echo "Contexts: $(find . -name "*context*" -o -name "*Context*" | grep -E '\.(ts|tsx)$' | wc -l)" >> source_code_patterns.txt
+
+      - name: Generate Tests with Claude AI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_BEDROCK_MODEL_ID: ${{ secrets.AWS_BEDROCK_MODEL_ID }}
+          TEST_TYPE: ${{ github.event.inputs.test_type }}
+          TEST_FRAMEWORK: ${{ github.event.inputs.test_framework }}
+          INCLUDE_TEST_README: ${{ github.event.inputs.include_test_readme }}
+          COVERAGE_TARGET: ${{ github.event.inputs.coverage_target }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          cat << 'EOF' > claude_test_generator.py
+          import boto3
+          import json
+          import os
+          import subprocess
+          import time
+          import random
+          from datetime import datetime
+          from botocore.config import Config
+          from github import Github
+          import re
+
+          class ClaudeTestGenerator:
+              def __init__(self):
+                  self.github_token = os.environ['GITHUB_TOKEN']
+                  self.bedrock_client = self.get_bedrock_client()
+                  self.model_id = os.environ.get('AWS_BEDROCK_MODEL_ID', 'us.anthropic.claude-3-5-sonnet-20241022-v2:0')
+                  self.test_type = os.environ.get('TEST_TYPE', 'all')
+                  self.test_framework = os.environ.get('TEST_FRAMEWORK', 'auto-detect')
+                  self.include_test_readme = os.environ.get('INCLUDE_TEST_README', 'true').lower() == 'true'
+                  self.coverage_target = os.environ.get('COVERAGE_TARGET', '80')
+                  self.repo_owner = os.environ['REPO_OWNER']
+                  self.repo_name = os.environ['REPO_NAME']
+                  self.target_branch = os.environ.get('TARGET_BRANCH', 'main')
+                  self.branch_name = "claude-test"
+                  
+              def get_bedrock_client(self):
+                  config = Config(
+                      read_timeout=300,
+                      connect_timeout=10,
+                      retries={
+                          'max_attempts': 5,
+                          'mode': 'adaptive'
+                      }
+                  )
+                  return boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'], config=config)
+
+              def read_file_safely(self, filepath, max_lines=150):
+                  """Read file content safely, limiting lines for context"""
+                  try:
+                      with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                          lines = f.readlines()
+                          if len(lines) > max_lines:
+                              return ''.join(lines[:max_lines]) + f'\n... (truncated, {len(lines)-max_lines} more lines)'
+                          return ''.join(lines)
+                  except Exception as e:
+                      return f"Error reading file: {str(e)}"
+
+              def analyze_project_for_testing(self):
+                  """Analyze the project structure and files for test generation"""
+                  print("📊 Analyzing project for test generation...")
+                  
+                  context = {
+                      'project_structure': '',
+                      'test_config_analysis': '',
+                      'source_code_patterns': '',
+                      'existing_tests': [],
+                      'source_files': [],
+                      'sample_source_files': {},
+                      'test_framework_detected': 'jest',  # default
+                      'file_stats': {}
+                  }
+                  
+                  # Read project structure
+                  if os.path.exists('test_project_structure.txt'):
+                      context['project_structure'] = self.read_file_safely('test_project_structure.txt', 100)
+                  
+                  # Read test configuration analysis
+                  if os.path.exists('test_config_analysis.txt'):
+                      context['test_config_analysis'] = self.read_file_safely('test_config_analysis.txt', 200)
+                  
+                  # Read source code patterns
+                  if os.path.exists('source_code_patterns.txt'):
+                      context['source_code_patterns'] = self.read_file_safely('source_code_patterns.txt', 50)
+                  
+                  # Read source files list
+                  if os.path.exists('source_files.txt'):
+                      with open('source_files.txt', 'r') as f:
+                          context['source_files'] = [line.strip() for line in f.readlines() if line.strip()]
+                  
+                  # Read existing tests
+                  if os.path.exists('existing_tests.txt'):
+                      with open('existing_tests.txt', 'r') as f:
+                          context['existing_tests'] = [line.strip() for line in f.readlines() if line.strip()]
+                  
+                  # Detect test framework from configuration
+                  config_content = context['test_config_analysis'].lower()
+                  if 'vitest' in config_content:
+                      context['test_framework_detected'] = 'vitest'
+                  elif 'cypress' in config_content:
+                      context['test_framework_detected'] = 'cypress'
+                  elif 'playwright' in config_content:
+                      context['test_framework_detected'] = 'playwright'
+                  elif 'jest' in config_content:
+                      context['test_framework_detected'] = 'jest'
+                  
+                  # Sample key source files for test generation
+                  priority_patterns = [
+                      r'src/.*[Pp]age.*\.(tsx?|jsx?)$',  # Pages
+                      r'src/.*[Cc]omponent.*\.(tsx?|jsx?)$',  # Components
+                      r'src/.*[Ss]ervice.*\.(tsx?|jsx?)$',  # Services
+                      r'src/.*[Uu]til.*\.(tsx?|jsx?)$',  # Utils
+                      r'src/.*[Hh]ook.*\.(tsx?|jsx?)$',  # Hooks
+                      r'src/.*[Cc]ontext.*\.(tsx?|jsx?)$',  # Contexts
+                      r'src/App\.(tsx?|jsx?)$',  # Main App
+                      r'src/main\.(tsx?|jsx?)$',  # Main entry
+                  ]
+                  
+                  sampled_files = []
+                  for pattern in priority_patterns:
+                      for file_path in context['source_files']:
+                          if re.search(pattern, file_path, re.IGNORECASE) and len(sampled_files) < 20:
+                              sampled_files.append(file_path)
+                  
+                  # Add some additional files if we don't have enough
+                  for file_path in context['source_files'][:10]:
+                      if len(sampled_files) < 25 and file_path not in sampled_files:
+                          sampled_files.append(file_path)
+                  
+                  # Read content of sampled files
+                  for file_path in sampled_files:
+                      if os.path.exists(file_path):
+                          context['sample_source_files'][file_path] = self.read_file_safely(file_path, 100)
+                  
+                  # Calculate file statistics
+                  context['file_stats'] = {
+                      'total_source_files': len(context['source_files']),
+                      'existing_tests': len(context['existing_tests']),
+                      'components': len([f for f in context['source_files'] if f.endswith('.tsx')]),
+                      'typescript_files': len([f for f in context['source_files'] if f.endswith('.ts')]),
+                      'coverage_gap': len(context['source_files']) - len(context['existing_tests'])
+                  }
+                  
+                  print(f"✅ Analyzed {len(context['source_files'])} source files and {len(context['existing_tests'])} existing tests")
+                  print(f"🔍 Sampled {len(sampled_files)} files for test generation")
+                  print(f"🧪 Detected test framework: {context['test_framework_detected']}")
+                  
+                  return context
+
+              def generate_tests_with_claude(self, project_context):
+                  """Generate comprehensive tests using Claude"""
+                  
+                  test_type_descriptions = {
+                      'all': 'Complete test suite including unit, integration, and component tests',
+                      'unit': 'Unit tests for individual functions and methods',
+                      'integration': 'Integration tests for component interactions',
+                      'e2e': 'End-to-end tests for full user workflows',
+                      'component': 'Component tests for React components'
+                  }
+                  
+                  framework = self.test_framework if self.test_framework != 'auto-detect' else project_context['test_framework_detected']
+                  
+                  test_prompt = f"""
+          You are an expert test engineer specializing in React, TypeScript, Ionic, and modern web application testing. 
+          You need to generate comprehensive, high-quality tests for a government billing/invoicing application.
+
+          ## TEST GENERATION REQUIREMENTS
+
+          **Test Type:** {self.test_type} - {test_type_descriptions.get(self.test_type, 'Comprehensive testing')}
+          **Framework:** {framework}
+          **Coverage Target:** {self.coverage_target}%
+          **Repository:** {self.repo_owner}/{self.repo_name}
+
+          ## PROJECT ANALYSIS
+
+          ### File Statistics
+          - Total source files: {project_context['file_stats']['total_source_files']}
+          - Existing tests: {project_context['file_stats']['existing_tests']}
+          - React components: {project_context['file_stats']['components']}
+          - TypeScript files: {project_context['file_stats']['typescript_files']}
+          - Coverage gap: {project_context['file_stats']['coverage_gap']} files without tests
+
+          ### Project Structure
+          ```
+          {project_context['project_structure']}
+          ```
+
+          ### Testing Configuration
+          {project_context['test_config_analysis']}
+
+          ### Source Code Patterns
+          {project_context['source_code_patterns']}
+
+          ### Existing Tests
+          {chr(10).join(project_context['existing_tests']) if project_context['existing_tests'] else 'No existing tests found'}
+
+          ### Sample Source Files for Testing
+          """
+                  
+                  # Add sample source files
+                  for file_path, content in project_context['sample_source_files'].items():
+                      test_prompt += f"\n**{file_path}:**\n```typescript\n{content}\n```\n"
+                  
+                  test_prompt += f"""
+
+          ## TEST GENERATION INSTRUCTIONS
+
+          Generate comprehensive, production-ready tests based on the analyzed codebase. Follow these requirements:
+
+          ### Test Framework: {framework}
+
+          {self.get_framework_specific_instructions(framework)}
+
+          ### Test Types to Generate
+
+          {self.get_test_type_instructions()}
+
+          ## OUTPUT FORMAT
+
+          Provide your response in this exact format:
+
+          ### TEST_FILES_TO_CREATE
+
+          List each test file that should be created with its full path relative to .github/claude/tests/
+
+          ### TEST_FILE_CONTENT
+
+          For each test file, provide the complete content:
+
+          #### FILE: .github/claude/tests/[path]/[filename].test.ts
+          ```typescript
+          // Complete test file content here
+          ```
+
+          #### EXPLANATION: [filename].test.ts
+          [Brief explanation of what this test file covers]
+
+          ### TEST_CONFIGURATION
+
+          Provide any necessary test configuration files:
+
+          #### FILE: .github/claude/tests/test-setup.ts
+          ```typescript
+          // Test setup and configuration
+          ```
+
+          ### PACKAGE_JSON_UPDATES
+
+          Suggest any package.json script updates or dependencies needed for testing:
+
+          ```json
+          {{
+            "scripts": {{
+              "test": "...",
+              "test:watch": "...",
+              "test:coverage": "..."
+            }},
+            "devDependencies": {{
+              // Any additional testing dependencies
+            }}
+          }}
+          ```
+
+          ## TESTING BEST PRACTICES
+
+          1. **Write Clear Test Names**: Use descriptive test names that explain what is being tested
+          2. **Test Edge Cases**: Include tests for error conditions and edge cases
+          3. **Mock External Dependencies**: Mock API calls, external services, and complex dependencies
+          4. **Test User Interactions**: For components, test user interactions and state changes
+          5. **Maintain Test Independence**: Each test should be independent and not rely on others
+          6. **Use Proper Assertions**: Use specific assertions that clearly validate expected behavior
+          7. **Group Related Tests**: Use describe blocks to group related tests logically
+          8. **Setup and Teardown**: Include proper setup and cleanup for tests
+
+          ## IONIC/REACT SPECIFIC CONSIDERATIONS
+
+          - Test Ionic components and their native behavior
+          - Mock Capacitor plugins and native functionality
+          - Test responsive behavior and mobile-specific features
+          - Include accessibility testing where appropriate
+          - Test navigation and routing
+          - Mock platform-specific APIs
+
+          Generate comprehensive, maintainable tests that provide good coverage and catch real bugs!
+          """
+                  
+                  return self.generate_with_retry(test_prompt)
+
+              def get_framework_specific_instructions(self, framework):
+                  """Get framework-specific testing instructions"""
+                  instructions = {
+                      'jest': """
+          - Use Jest testing framework with React Testing Library
+          - Use @testing-library/jest-dom for additional matchers
+          - Mock modules with jest.mock()
+          - Use jest.fn() for function mocking
+          - Configure proper test environment for React components
+                      """,
+                      'vitest': """
+          - Use Vitest testing framework (Vite-native testing)
+          - Use @testing-library/react for component testing
+          - Use vi.mock() for module mocking
+          - Use vi.fn() for function mocking
+          - Configure Vitest for TypeScript and React
+                      """,
+                      'cypress': """
+          - Use Cypress for end-to-end testing
+          - Write tests for complete user workflows
+          - Use cy.get(), cy.click(), cy.type() for interactions
+          - Test actual browser behavior and UI
+          - Include visual testing where appropriate
+                      """,
+                      'playwright': """
+          - Use Playwright for end-to-end testing
+          - Test across multiple browsers
+          - Use page.locator() for element selection
+          - Include screenshot testing
+          - Test mobile and desktop viewports
+                      """
+                  }
+                  return instructions.get(framework, instructions['jest'])
+
+              def get_test_type_instructions(self):
+                  """Get instructions based on test type"""
+                  if self.test_type == 'all':
+                      return """
+          - **Unit Tests**: Test individual functions, utilities, and services
+          - **Component Tests**: Test React components in isolation
+          - **Integration Tests**: Test component interactions and data flow
+          - **E2E Tests**: Test complete user workflows (if framework supports it)
+                      """
+                  elif self.test_type == 'unit':
+                      return """
+          - Focus on testing individual functions and methods
+          - Test utility functions, helpers, and services
+          - Mock all external dependencies
+          - Test edge cases and error conditions
+                      """
+                  elif self.test_type == 'component':
+                      return """
+          - Test React components in isolation
+          - Test component props, state, and events
+          - Test user interactions with components
+          - Mock external dependencies and services
+                      """
+                  elif self.test_type == 'integration':
+                      return """
+          - Test component interactions and data flow
+          - Test API integrations with mocked responses
+          - Test context providers and consumers
+          - Test routing and navigation
+                      """
+                  elif self.test_type == 'e2e':
+                      return """
+          - Test complete user workflows
+          - Test critical business processes
+          - Test across different devices and browsers
+          - Include visual regression testing
+                      """
+                  return "Generate comprehensive tests covering all aspects of the application."
+
+              def generate_with_retry(self, prompt, max_retries=10):
+                  """Generate tests with retry logic"""
+                  print("🤖 Generating tests with Claude AI...")
+                  print(f"📝 Prompt length: {len(prompt):,} characters")
+                  print(f"🎯 Using model: {self.model_id}")
+                  print(f"🧪 Test type: {self.test_type}")
+                  print("=" * 80)
+                  
+                  for attempt in range(max_retries):
+                      try:
+                          print(f"🚀 Attempt {attempt + 1}/{max_retries}")
+                          
+                          body = {
+                              "anthropic_version": "bedrock-2023-05-31",
+                              "max_tokens": 15000,
+                              "messages": [
+                                  {
+                                      "role": "user",
+                                      "content": prompt
+                                  }
+                              ]
+                          }
+                          
+                          start_time = time.time()
+                          response = self.bedrock_client.invoke_model(
+                              body=json.dumps(body),
+                              modelId=self.model_id,
+                              accept='application/json',
+                              contentType='application/json'
+                          )
+                          
+                          response_body = json.loads(response.get('body').read())
+                          test_content = response_body['content'][0]['text']
+                          
+                          end_time = time.time()
+                          generation_time = end_time - start_time
+                          
+                          print(f"✅ Tests generated in {generation_time:.2f} seconds!")
+                          print(f"📊 Content length: {len(test_content):,} characters")
+                          print("=" * 80)
+                          
+                          return test_content
+                          
+                      except Exception as e:
+                          error_str = str(e)
+                          print(f"❌ Attempt {attempt + 1} failed: {error_str}")
+                          
+                          if attempt < max_retries - 1:
+                              delay = min(2 ** attempt + random.uniform(0, 1), 60)
+                              print(f"⏳ Waiting {delay:.2f} seconds before retry...")
+                              time.sleep(delay)
+                          else:
+                              print("❌ All retry attempts exhausted")
+                              return None
+                  
+                  return None
+
+              def parse_and_save_tests(self, test_content):
+                  """Parse Claude's response and save test files"""
+                  print("💾 Parsing and saving test files...")
+                  
+                  # Create tests directory
+                  tests_dir = '.github/claude/tests'
+                  os.makedirs(tests_dir, exist_ok=True)
+                  
+                  created_files = []
+                  
+                  try:
+                      # Extract test files using regex
+                      file_pattern = r'#### FILE: ([^\n]+)\n```(?:typescript|javascript|json)?\n(.*?)\n```'
+                      matches = re.findall(file_pattern, test_content, re.DOTALL)
+                      
+                      if not matches:
+                          print("⚠️ No test file patterns found in Claude's response")
+                          # Save the raw response as a reference
+                          raw_file = os.path.join(tests_dir, 'claude_test_response.md')
+                          with open(raw_file, 'w', encoding='utf-8') as f:
+                              f.write(test_content)
+                          created_files.append(raw_file)
+                          return created_files
+                      
+                      print(f"📁 Found {len(matches)} test files to create")
+                      
+                      for i, (file_path, content) in enumerate(matches, 1):
+                          # Clean up the file path
+                          file_path = file_path.strip()
+                          if not file_path.startswith('.github/claude/tests/'):
+                              # Ensure the file is saved in the tests directory
+                              filename = os.path.basename(file_path)
+                              file_path = os.path.join(tests_dir, filename)
+                          
+                          content = content.strip()
+                          
+                          print(f"📄 Creating test file {i}/{len(matches)}: {file_path}")
+                          
+                          # Create directory if it doesn't exist
+                          dir_path = os.path.dirname(file_path)
+                          if dir_path:
+                              os.makedirs(dir_path, exist_ok=True)
+                          
+                          # Write file content
+                          with open(file_path, 'w', encoding='utf-8') as f:
+                              f.write(content)
+                          
+                          created_files.append(file_path)
+                          print(f"✅ Created: {file_path}")
+                  
+                  except Exception as e:
+                      print(f"❌ Error parsing test files: {e}")
+                      # Save raw response as fallback
+                      raw_file = os.path.join(tests_dir, 'claude_test_response.md')
+                      with open(raw_file, 'w', encoding='utf-8') as f:
+                          f.write(test_content)
+                      created_files.append(raw_file)
+                  
+                  return created_files
+
+              def create_test_readme(self, created_files, project_context):
+                  """Create README for the tests directory"""
+                  if not self.include_test_readme:
+                      return None
+                  
+                  print("📖 Creating test README...")
+                  
+                  framework = self.test_framework if self.test_framework != 'auto-detect' else project_context['test_framework_detected']
+                  
+                  readme_content = f"""# Claude AI Generated Tests
+
+          **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          **Test Type:** {self.test_type}
+          **Framework:** {framework}
+          **Coverage Target:** {self.coverage_target}%
+
+          ## 📋 Overview
+
+          This directory contains comprehensive tests generated by Claude AI for the {self.repo_name} project.
+          The tests are designed to provide good coverage and catch real bugs in your application.
+
+          ## 🧪 Generated Test Files
+
+          """
+                  
+                  for file_path in created_files:
+                      filename = os.path.basename(file_path)
+                      readme_content += f"- `{filename}` - {self.get_file_description(filename)}\n"
+                  
+                  readme_content += f"""
+
+          ## 🚀 Running Tests
+
+          ### Prerequisites
+
+          Make sure you have the necessary testing dependencies installed:
+
+          ```bash
+          npm install --save-dev {self.get_dependencies_for_framework(framework)}
+          ```
+
+          ### Running Tests in This Directory Only
+
+          To run only the tests in this directory:
+
+          ```bash
+          # Run all tests in this directory
+          {self.get_run_command_for_framework(framework, '.github/claude/tests')}
+
+          # Run tests with coverage
+          {self.get_coverage_command_for_framework(framework, '.github/claude/tests')}
+
+          # Run tests in watch mode
+          {self.get_watch_command_for_framework(framework, '.github/claude/tests')}
+          ```
+
+          ### Running Specific Test Files
+
+          ```bash
+          # Run a specific test file
+          {self.get_specific_file_command(framework)}
+          ```
+
+          ## 📊 Test Coverage
+
+          Target coverage: **{self.coverage_target}%**
+
+          To check coverage for these tests:
+
+          ```bash
+          {self.get_coverage_command_for_framework(framework, '.github/claude/tests')}
+          ```
+
+          ## 🔧 Test Configuration
+
+          ### Framework: {framework}
+
+          {self.get_framework_documentation(framework)}
+
+          ## 📝 Test Structure
+
+          Each test file follows these conventions:
+
+          - **Descriptive test names** that explain what is being tested
+          - **Proper setup and teardown** for clean test environments
+          - **Mocked dependencies** for isolated testing
+          - **Edge case testing** for robust error handling
+          - **Clear assertions** that validate expected behavior
+
+          ## 🎯 Test Types Generated
+
+          {self.get_test_types_documentation()}
+
+          ## 🔄 Maintenance
+
+          ### Adding New Tests
+
+          1. Follow the existing naming conventions
+          2. Place tests in appropriate subdirectories
+          3. Use the same testing patterns and setup
+          4. Update this README if you add new categories
+
+          ### Updating Tests
+
+          When source code changes:
+
+          1. Review related test files
+          2. Update test cases as needed
+          3. Ensure coverage targets are maintained
+          4. Run the full test suite to ensure no regressions
+
+          ## 🐛 Debugging Tests
+
+          ### Common Issues
+
+          1. **Import errors**: Check that all dependencies are installed
+          2. **Mock failures**: Verify that mocks match the actual API
+          3. **Async issues**: Ensure proper async/await handling
+          4. **Environment setup**: Check test environment configuration
+
+          ### Debug Commands
+
+          ```bash
+          # Run tests with verbose output
+          {self.get_verbose_command(framework)}
+
+          # Run tests with debugging
+          {self.get_debug_command(framework)}
+          ```
+
+          ## 📚 Resources
+
+          - [{framework} Documentation](https://example.com)
+          - [Testing Best Practices](https://example.com)
+          - [React Testing Library](https://testing-library.com/docs/react-testing-library/intro/)
+          - [Ionic Testing Guide](https://ionicframework.com/docs/testing/overview)
+
+          ## 🤝 Contributing
+
+          When contributing new tests:
+
+          1. Follow the existing patterns and conventions
+          2. Ensure tests are independent and can run in any order
+          3. Use descriptive test names and clear assertions
+          4. Include both positive and negative test cases
+          5. Mock external dependencies appropriately
+
+          ---
+
+          *Tests generated by Claude AI - Review and customize as needed for your specific requirements*
+          """
+                  
+                  readme_path = '.github/claude/tests/README.md'
+                  with open(readme_path, 'w', encoding='utf-8') as f:
+                      f.write(readme_content)
+                  
+                  print(f"✅ Test README created: {readme_path}")
+                  return readme_path
+
+              def get_file_description(self, filename):
+                  """Get description for a test file based on its name"""
+                  if 'component' in filename.lower():
+                      return "Component tests"
+                  elif 'service' in filename.lower():
+                      return "Service layer tests"
+                  elif 'util' in filename.lower() or 'helper' in filename.lower():
+                      return "Utility function tests"
+                  elif 'hook' in filename.lower():
+                      return "React hooks tests"
+                  elif 'context' in filename.lower():
+                      return "Context provider tests"
+                  elif 'e2e' in filename.lower() or 'integration' in filename.lower():
+                      return "End-to-end tests"
+                  else:
+                      return "Application tests"
+
+              def get_dependencies_for_framework(self, framework):
+                  """Get dependencies needed for the testing framework"""
+                  deps = {
+                      'jest': '@testing-library/react @testing-library/jest-dom @testing-library/user-event jest jest-environment-jsdom',
+                      'vitest': '@testing-library/react @testing-library/jest-dom @testing-library/user-event vitest jsdom',
+                      'cypress': 'cypress @testing-library/cypress',
+                      'playwright': '@playwright/test'
+                  }
+                  return deps.get(framework, deps['jest'])
+
+              def get_run_command_for_framework(self, framework, path):
+                  """Get command to run tests for specific framework and path"""
+                  commands = {
+                      'jest': f'npx jest {path}',
+                      'vitest': f'npx vitest run {path}',
+                      'cypress': f'npx cypress run --spec "{path}/**/*"',
+                      'playwright': f'npx playwright test {path}'
+                  }
+                  return commands.get(framework, commands['jest'])
+
+              def get_coverage_command_for_framework(self, framework, path):
+                  """Get command to run tests with coverage"""
+                  commands = {
+                      'jest': f'npx jest {path} --coverage',
+                      'vitest': f'npx vitest run {path} --coverage',
+                      'cypress': f'npx cypress run --spec "{path}/**/*" (coverage via plugin)',
+                      'playwright': f'npx playwright test {path} --reporter=html'
+                  }
+                  return commands.get(framework, commands['jest'])
+
+              def get_watch_command_for_framework(self, framework, path):
+                  """Get command to run tests in watch mode"""
+                  commands = {
+                      'jest': f'npx jest {path} --watch',
+                      'vitest': f'npx vitest {path}',
+                      'cypress': f'npx cypress open',
+                      'playwright': f'npx playwright test {path} --ui'
+                  }
+                  return commands.get(framework, commands['jest'])
+
+              def get_specific_file_command(self, framework):
+                  """Get command to run a specific test file"""
+                  commands = {
+                      'jest': 'npx jest .github/claude/tests/specific-test.test.ts',
+                      'vitest': 'npx vitest run .github/claude/tests/specific-test.test.ts',
+                      'cypress': 'npx cypress run --spec ".github/claude/tests/specific-test.cy.ts"',
+                      'playwright': 'npx playwright test .github/claude/tests/specific-test.spec.ts'
+                  }
+                  return commands.get(framework, commands['jest'])
+
+              def get_verbose_command(self, framework):
+                  """Get command to run tests with verbose output"""
+                  commands = {
+                      'jest': 'npx jest --verbose',
+                      'vitest': 'npx vitest run --reporter=verbose',
+                      'cypress': 'npx cypress run --spec ".github/claude/tests/**/*" --reporter spec',
+                      'playwright': 'npx playwright test --reporter=list'
+                  }
+                  return commands.get(framework, commands['jest'])
+
+              def get_debug_command(self, framework):
+                  """Get command to debug tests"""
+                  commands = {
+                      'jest': 'node --inspect-brk node_modules/.bin/jest --runInBand',
+                      'vitest': 'npx vitest --inspect-brk',
+                      'cypress': 'npx cypress open (use browser dev tools)',
+                      'playwright': 'npx playwright test --debug'
+                  }
+                  return commands.get(framework, commands['jest'])
+
+              def get_framework_documentation(self, framework):
+                  """Get framework-specific documentation"""
+                  docs = {
+                      'jest': """
+          Jest is a JavaScript testing framework with a focus on simplicity.
+          - Uses describe() and test() functions to structure tests
+          - Built-in assertion library with expect()
+          - Powerful mocking capabilities with jest.mock()
+          - Snapshot testing for React components
+                      """,
+                      'vitest': """
+          Vitest is a Vite-native testing framework that's fast and modern.
+          - Compatible with Jest API but faster
+          - Native TypeScript support
+          - Uses vi.mock() for mocking
+          - Built-in coverage reporting
+                      """,
+                      'cypress': """
+          Cypress is an end-to-end testing framework for web applications.
+          - Tests run in a real browser
+          - Interactive test runner
+          - Time-travel debugging
+          - Real network traffic (can be stubbed)
+                      """,
+                      'playwright': """
+          Playwright is a modern end-to-end testing framework.
+          - Cross-browser testing (Chrome, Firefox, Safari)
+          - Mobile testing support
+          - Auto-wait for elements
+          - Rich reporting and debugging
+                      """
+                  }
+                  return docs.get(framework, docs['jest']).strip()
+
+              def get_test_types_documentation(self):
+                  """Get documentation about generated test types"""
+                  if self.test_type == 'all':
+                      return """
+          - **Unit Tests**: Testing individual functions and methods in isolation
+          - **Component Tests**: Testing React components with user interactions
+          - **Integration Tests**: Testing component interactions and data flow
+          - **Service Tests**: Testing API calls and business logic
+                      """
+                  elif self.test_type == 'unit':
+                      return "**Unit Tests**: Testing individual functions and methods in isolation"
+                  elif self.test_type == 'component':
+                      return "**Component Tests**: Testing React components with user interactions"
+                  elif self.test_type == 'integration':
+                      return "**Integration Tests**: Testing component interactions and data flow"
+                  elif self.test_type == 'e2e':
+                      return "**End-to-End Tests**: Testing complete user workflows"
+                  return "Various test types based on the project structure"
+
+              def create_branch_and_commit(self, created_files):
+                  """Create branch and commit test files"""
+                  try:
+                      print(f"🌿 Creating branch: {self.branch_name}")
+                      
+                      # Configure git
+                      subprocess.run(['git', 'config', 'user.name', 'Claude Test Generator'], check=True)
+                      subprocess.run(['git', 'config', 'user.email', 'claude-test@github-actions.bot'], check=True)
+                      
+                      # Create and checkout new branch
+                      subprocess.run(['git', 'checkout', '-b', self.branch_name], check=True)
+                      
+                      # Add all test files
+                      for file_path in created_files:
+                          subprocess.run(['git', 'add', file_path], check=True)
+                      
+                      # Create commit message
+                      commit_msg = f"""🧪 Generate comprehensive tests with Claude AI
+
+          Auto-generated test suite by Claude AI
+
+          Test Type: {self.test_type}
+          Framework: {self.test_framework}
+          Coverage Target: {self.coverage_target}%
+          Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          Files Created: {len(created_files)}
+
+          This test suite includes:
+          🧪 {self.test_type} tests using {self.test_framework}
+          📋 Test documentation and setup instructions
+          🎯 Target coverage of {self.coverage_target}%
+          🔧 Framework-specific configurations
+          """
+                      
+                      # Commit changes
+                      subprocess.run(['git', 'commit', '-m', commit_msg], check=True)
+                      
+                      # Push branch
+                      subprocess.run(['git', 'push', '-u', 'origin', self.branch_name], check=True)
+                      
+                      print(f"✅ Successfully pushed tests to branch: {self.branch_name}")
+                      return True
+                      
+                  except subprocess.CalledProcessError as e:
+                      print(f"❌ Git operation failed: {e}")
+                      return False
+
+              def create_pull_request(self, created_files):
+                  """Create pull request for the generated tests"""
+                  try:
+                      print("📝 Creating pull request...")
+                      
+                      github_client = Github(self.github_token)
+                      
+                      # Create PR in the current repository only
+                      target_repo_obj = github_client.get_repo(f"{self.repo_owner}/{self.repo_name}")
+                      head_ref = self.branch_name
+                      base_ref = self.target_branch
+                      print(f"📦 Creating PR: {head_ref} -> {base_ref}")
+                      
+                      pr_title = f"🧪 Claude AI Generated Tests ({self.test_type}) - {datetime.now().strftime('%Y-%m-%d')}"
+                      
+                      pr_body = f"""# 🧪 Claude AI Generated Test Suite
+
+          This pull request contains a comprehensive test suite automatically generated by Claude AI.
+
+          ## 📋 Test Details
+          - **Test Type:** {self.test_type}
+          - **Framework:** {self.test_framework}
+          - **Coverage Target:** {self.coverage_target}%
+          - **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          - **Files Created:** {len(created_files)}
+
+          ## 🧪 Generated Tests
+
+          """
+                      
+                      for file_path in created_files:
+                          filename = os.path.basename(file_path)
+                          pr_body += f"- `{filename}` - {self.get_file_description(filename)}\n"
+                      
+                      pr_body += f"""
+
+          ## 🚀 Running the Tests
+
+          Navigate to the tests directory and run:
+
+          ```bash
+          # Install testing dependencies (if not already installed)
+          npm install --save-dev {self.get_dependencies_for_framework(self.test_framework)}
+
+          # Run all tests in the generated directory
+          {self.get_run_command_for_framework(self.test_framework, '.github/claude/tests')}
+
+          # Run with coverage
+          {self.get_coverage_command_for_framework(self.test_framework, '.github/claude/tests')}
+          ```
+
+          ## 📖 Documentation
+
+          Check the `README.md` in the tests directory for:
+          - Detailed setup instructions
+          - Framework-specific commands
+          - Debugging guidelines
+          - Best practices
+
+          ## 🔍 Review Notes
+
+          - Tests are generated based on project analysis and may need customization
+          - Review test assertions and mocks for accuracy
+          - Verify that all necessary dependencies are included
+          - Consider integrating these tests into your CI/CD pipeline
+
+          ## 🎯 Next Steps
+
+          1. **Review** the generated test files
+          2. **Run** the tests to ensure they pass
+          3. **Customize** any project-specific test requirements
+          4. **Integrate** into your testing workflow
+          5. **Expand** test coverage as needed
+
+          ## 📊 Test Coverage Goal
+
+          These tests aim for **{self.coverage_target}%** coverage. Monitor actual coverage and adjust as needed.
+
+          ---
+          *Generated automatically by Claude AI Test Generator 🤖*
+          """
+                      
+                      # Try to create PR using PyGithub first
+                      try:
+                          pull_request = target_repo_obj.create_pull(
+                              title=pr_title,
+                              body=pr_body,
+                              head=head_ref,
+                              base=base_ref
+                          )
+                          
+                          # Add labels
+                          try:
+                              pull_request.add_to_labels('tests', 'claude-generated', 'testing')
+                          except:
+                              pass  # Labels might not exist
+                          
+                          print(f"✅ Pull request created: {pull_request.html_url}")
+                          return pull_request.html_url
+                      except Exception as pr_error:
+                          if "not permitted" in str(pr_error) or "403" in str(pr_error):
+                              print("⚠️ GitHub Actions cannot create PRs directly. Using GitHub CLI fallback...")
+                              
+                              # Try using GitHub CLI
+                              try:
+                                  cli_args = [
+                                      'gh', 'pr', 'create',
+                                      '--title', pr_title,
+                                      '--body', pr_body,
+                                      '--head', head_ref,
+                                      '--base', base_ref
+                                  ]
+                                  
+                                  result = subprocess.run(cli_args, capture_output=True, text=True, check=True)
+                                  
+                                  pr_url = result.stdout.strip()
+                                  print(f"✅ Pull request created via GitHub CLI: {pr_url}")
+                                  return pr_url
+                              except subprocess.CalledProcessError as cli_error:
+                                  print(f"❌ GitHub CLI also failed: {cli_error}")
+                                  
+                                  # Final fallback - create a summary file instead
+                                  print("📝 Creating test summary instead of PR...")
+                                  summary_path = self.create_test_summary(created_files)
+                                  print(f"✅ Test summary created: {summary_path}")
+                                  print("💡 You can manually create a PR from the claude-test branch")
+                                  return f"Branch: {self.branch_name} (manual PR needed)"
+                          else:
+                              raise pr_error
+                      
+                  except Exception as e:
+                      print(f"❌ Failed to create pull request: {e}")
+                      # Create summary as fallback
+                      summary_path = self.create_test_summary(created_files)
+                      print(f"✅ Test summary created instead: {summary_path}")
+                      return None
+
+              def create_test_summary(self, created_files):
+                  """Create a summary file when PR creation fails"""
+                  summary_content = f"""# 🧪 Claude AI Test Generation Summary
+
+          **Generation Completed:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+          **Branch:** {self.branch_name}
+          **Test Type:** {self.test_type}
+          **Framework:** {self.test_framework}
+          **Files Created:** {len(created_files)}
+
+          ## 📋 Generated Test Files
+
+          """
+                  
+                  for file_path in created_files:
+                      summary_content += f"- `{file_path}`\n"
+                  
+                  summary_content += f"""
+
+          ## 🚀 Running Tests
+
+          Navigate to the tests directory:
+          ```bash
+          cd .github/claude/tests
+          {self.get_run_command_for_framework(self.test_framework, '.')}
+          ```
+
+          ## 🔄 Next Steps
+
+          1. **Review the generated tests** in `.github/claude/tests/`
+          2. **Read the README** for detailed setup instructions
+          3. **Create a Pull Request manually:**
+             - Go to your repository on GitHub
+             - Switch to the `{self.branch_name}` branch
+             - Click "Create Pull Request"
+          4. **Run the tests** to ensure they work correctly
+
+          ## 🔗 Quick Links
+
+          - **Branch:** [{self.branch_name}](https://github.com/{self.repo_owner}/{self.repo_name}/tree/{self.branch_name})
+          - **Tests Directory:** [.github/claude/tests](https://github.com/{self.repo_owner}/{self.repo_name}/tree/{self.branch_name}/.github/claude/tests)
+
+          ---
+          *Generated by Claude AI Test Generator*
+          """
+                  
+                  summary_path = 'TEST_GENERATION_SUMMARY.md'
+                  with open(summary_path, 'w', encoding='utf-8') as f:
+                      f.write(summary_content)
+                  
+                  # Add and commit the summary
+                  try:
+                      subprocess.run(['git', 'add', summary_path], check=True)
+                      subprocess.run(['git', 'commit', '-m', 'Add test generation summary'], check=True)
+                      subprocess.run(['git', 'push'], check=True)
+                  except:
+                      pass
+                  
+                  return summary_path
+
+              def run_test_generation(self):
+                  """Main test generation execution method"""
+                  print("🧪 Starting Claude AI Test Generation...")
+                  print(f"🎯 Test type: {self.test_type}")
+                  print(f"🛠️ Framework: {self.test_framework}")
+                  print(f"📊 Coverage target: {self.coverage_target}%")
+                  print(f"📖 Include README: {self.include_test_readme}")
+                  print("=" * 80)
+                  
+                  # Step 1: Analyze project for testing
+                  project_context = self.analyze_project_for_testing()
+                  
+                  # Step 2: Generate tests with Claude
+                  test_content = self.generate_tests_with_claude(project_context)
+                  
+                  if not test_content:
+                      print("❌ Failed to generate tests")
+                      return False
+                  
+                  # Step 3: Parse and save test files
+                  created_files = self.parse_and_save_tests(test_content)
+                  
+                  # Step 4: Create test README
+                  readme_path = self.create_test_readme(created_files, project_context)
+                  if readme_path:
+                      created_files.append(readme_path)
+                  
+                  # Step 5: Create branch and commit
+                  if self.create_branch_and_commit(created_files):
+                      # Step 6: Create pull request
+                      pr_url = self.create_pull_request(created_files)
+                      
+                      if pr_url:
+                          print("=" * 80)
+                          print("🎉 Test generation completed successfully!")
+                          print(f"📁 Tests directory: .github/claude/tests")
+                          print(f"📄 Files created: {len(created_files)}")
+                          print(f"🔗 Pull Request: {pr_url}")
+                          print("=" * 80)
+                          return True
+                      else:
+                          print("=" * 80)
+                          print("🎉 Test generation completed successfully!")
+                          print(f"📁 Tests directory: .github/claude/tests")
+                          print(f"📄 Files created: {len(created_files)}")
+                          print(f"🌿 Branch: {self.branch_name}")
+                          print("💡 Create a pull request manually from the GitHub interface")
+                          print("=" * 80)
+                          return True  # Still consider this successful
+                  else:
+                      print("❌ Failed to create branch and commit test files")
+                      return False
+
+          if __name__ == "__main__":
+              generator = ClaudeTestGenerator()
+              success = generator.run_test_generation()
+              exit(0 if success else 1)
+          EOF
+
+          python claude_test_generator.py
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "🧪 Claude AI Test Generator Summary"
+          echo "=================================="
+          echo "Test Type: ${{ github.event.inputs.test_type }}"
+          echo "Framework: ${{ github.event.inputs.test_framework }}"
+          echo "Coverage Target: ${{ github.event.inputs.coverage_target }}%"
+          echo "Include README: ${{ github.event.inputs.include_test_readme }}"
+          echo "Branch: claude-test"
+          echo "Tests Location: .github/claude/tests/"
+          echo ""
+          echo "🧪 Generated tests include:"
+          echo "  📊 Comprehensive test coverage analysis"
+          echo "  🔬 Framework-specific test implementations"
+          echo "  📖 Detailed README with run instructions"
+          echo "  🎯 Targeted coverage goals"
+          echo "  🔧 Proper setup and configuration"
+          echo ""
+          echo "📄 Check the pull request for the generated test suite!"
