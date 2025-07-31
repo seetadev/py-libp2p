@@ -88,25 +88,8 @@ class StellarP2PIntents:
         listen_addr = f"/ip4/0.0.0.0/tcp/{self.listen_port}"
         listen_multiaddr = Multiaddr(listen_addr)
 
-        # Create host
-        self.host = new_host(
-            self.libp2p_keypair,
-            listen_addrs=[listen_multiaddr],
-        )
-
-        # Initialize DHT
-        dht_mode = DHTMode.SERVER if self.is_bootstrap else DHTMode.CLIENT
-        self.dht = KadDHT(self.host, mode=dht_mode)
-
-        # Initialize PubSub
-        gossip_router = GossipSub(
-            [self.PROTOCOL],
-            10,
-            9,
-            11,
-            px_peers_count=30,
-        )
-        self.pubsub = Pubsub(self.host, gossip_router)
+        # Create host WITHOUT bootstrap addresses
+        self.host = new_host(self.libp2p_keypair)
 
         print(
             f"{'Bootstrap' if self.is_bootstrap else 'Regular'} node "
@@ -119,12 +102,39 @@ class StellarP2PIntents:
         # Start services in nursery
         async with trio.open_nursery() as nursery:
             self.nursery = nursery
+            # Start peerstore cleanup task
+            nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
+            
             async with self.host.run([listen_multiaddr]):
                 await trio.sleep(0.1)  # Let host initialize
+
+                # Connect to bootstrap nodes FIRST (before DHT)
+                if not self.is_bootstrap and bootstrap_addrs:
+                    await self._connect_bootstrap(bootstrap_addrs)
+
+                # Initialize DHT AFTER bootstrap connections
+                dht_mode = DHTMode.SERVER if self.is_bootstrap else DHTMode.CLIENT
+                self.dht = KadDHT(self.host, mode=dht_mode)
+
+                # Add all connected peers to DHT routing table
+                for peer_id in self.host.get_peerstore().peer_ids():
+                    await self.dht.routing_table.add_peer(peer_id)
+
+                print(f"Connected peers after bootstrap: {len(self.host.get_connected_peers())}")
 
                 # Start DHT using background service
                 async with background_trio_service(self.dht):
                     await trio.sleep(0.1)  # Let DHT initialize
+
+                    # Initialize PubSub AFTER DHT is running
+                    gossip_router = GossipSub(
+                        [self.PROTOCOL],
+                        10,
+                        9,
+                        11,
+                        px_peers_count=30,
+                    )
+                    self.pubsub = Pubsub(self.host, gossip_router)
 
                     # Subscribe to intent topic
                     await self.pubsub.subscribe(self.PROTOCOL)
@@ -134,15 +144,19 @@ class StellarP2PIntents:
                         True,
                     )
 
-                    # Connect to bootstrap nodes
-                    if not self.is_bootstrap and bootstrap_addrs:
-                        await self._connect_bootstrap(bootstrap_addrs)
-
                     # Fund account if not bootstrap
                     if not self.is_bootstrap:
                         await self._ensure_funded()
 
+                    # If this is a bootstrap node, save address for others to use
+                    if self.is_bootstrap:
+                        peer_id = self.host.get_id().pretty()
+                        full_addr = f"/ip4/127.0.0.1/tcp/{self.listen_port}/p2p/{peer_id}"
+                        save_bootstrap_addr(full_addr)
+                        print(f"Bootstrap node address: {full_addr}")
+
                     print("P2P node ready!")
+                    print(f"Connected peers: {len(self.host.get_connected_peers())}")
 
                     # Keep running
                     try:
@@ -156,6 +170,10 @@ class StellarP2PIntents:
         for addr_str in bootstrap_addrs:
             try:
                 peer_info = info_from_p2p_addr(Multiaddr(addr_str))
+                # Add peer to peerstore first
+                self.host.get_peerstore().add_addrs(
+                    peer_info.peer_id, peer_info.addrs, 3600
+                )
                 await self.host.connect(peer_info)
                 print(f"Connected to bootstrap: {addr_str}")
             except Exception as e:
@@ -342,9 +360,9 @@ class StellarP2PIntents:
             }
 
             intent_id = (
-                f"intent_{hashlib.sha256(
+                "intent_" + hashlib.sha256(
                     json.dumps(intent_data, sort_keys=True).encode()
-                ).hexdigest()[:16]}"
+                ).hexdigest()[:16]
             )
 
             intent = {
@@ -448,45 +466,58 @@ async def main():
     try:
         if args.bootstrap:
             # Bootstrap node
-            await node.start([args.bootstrap_addr])
+            await node.start()
         elif args.send_to:
             # Sender node
             bootstrap_addrs = get_bootstrap_addresses()
-            full_bootstrap_addrs = []
+            valid_bootstrap_addrs = []
 
             for addr in bootstrap_addrs:
-                full_addr = await discover_bootstrap_peer_id(addr)
-                if full_addr:
-                    full_bootstrap_addrs.append(full_addr)
+                if validate_bootstrap_addr(addr):
+                    valid_bootstrap_addrs.append(addr)
+                else:
+                    print(f"Skipping invalid bootstrap address: {addr}")
 
-            if not full_bootstrap_addrs:
-                print("No valid bootstrap addresses found")
+            if not valid_bootstrap_addrs:
+                print("No valid bootstrap addresses found. Please ensure:")
+                print("1. Bootstrap node is running")
+                print("2. Bootstrap addresses include peer IDs")
+                print("3. Use format: /ip4/127.0.0.1/tcp/4001/p2p/<peer_id>")
                 return
 
-            trio.lowlevel.current_task().parent_nursery.start_soon(
-                node.start, full_bootstrap_addrs
-            )
-            await trio.sleep(2)  # Let node initialize
+            # Start node in background and send payment
+            async with trio.open_nursery() as nursery:
+                nursery.start_soon(node.start, valid_bootstrap_addrs)
+                await trio.sleep(3)  # Let node initialize and connect
 
-            # Send payment
-            await node.send_payment_intent(
-                args.send_to,
-                args.amount,
-                args.asset,
-            )
-            await trio.sleep(10)  # Wait for response
+                # Send payment
+                await node.send_payment_intent(
+                    args.send_to,
+                    args.amount,
+                    args.asset,
+                )
+                await trio.sleep(10)  # Wait for response
+                nursery.cancel_scope.cancel()
 
         elif args.listen:
             # Receiver node
             bootstrap_addrs = get_bootstrap_addresses()
-            full_bootstrap_addrs = []
+            valid_bootstrap_addrs = []
 
             for addr in bootstrap_addrs:
-                full_addr = await discover_bootstrap_peer_id(addr)
-                if full_addr:
-                    full_bootstrap_addrs.append(full_addr)
+                if validate_bootstrap_addr(addr):
+                    valid_bootstrap_addrs.append(addr)
+                else:
+                    print(f"Skipping invalid bootstrap address: {addr}")
 
-            await node.start(full_bootstrap_addrs)
+            if not valid_bootstrap_addrs:
+                print("No valid bootstrap addresses found. Please ensure:")
+                print("1. Bootstrap node is running")
+                print("2. Bootstrap addresses include peer IDs")
+                print("3. Use format: /ip4/127.0.0.1/tcp/4001/p2p/<peer_id>")
+                return
+
+            await node.start(valid_bootstrap_addrs)
         else:
             print("Must specify --bootstrap, --listen, --send-to, or --demo")
 
@@ -517,7 +548,18 @@ def get_bootstrap_addresses():
         except Exception as e:
             print(f"Failed to load config file: {e}")
 
-    # 4. Well-known production addresses (if any)
+    # 4. Load from local bootstrap log file
+    bootstrap_log = Path("stellar_bootstrap_addrs.txt")
+    if bootstrap_log.exists():
+        try:
+            with open(bootstrap_log) as f:
+                addrs = [line.strip() for line in f if line.strip()]
+                if addrs:
+                    return addrs
+        except Exception as e:
+            print(f"Failed to load bootstrap log: {e}")
+
+    # 5. Well-known production addresses (if any)
     production_bootstraps = [
         # These would be real addresses of hosted bootstrap nodes
         # "/dns4/bootstrap1.stellar-intents.org/tcp/4001/p2p/12D3Koo...",
@@ -527,20 +569,30 @@ def get_bootstrap_addresses():
     if production_bootstraps:
         return production_bootstraps
 
-    # 5. Fallback to localhost for development
+    # 6. Fallback to localhost for development
     return ["/ip4/127.0.0.1/tcp/4001"]
 
 
-async def discover_bootstrap_peer_id(bootstrap_addr: str) -> Optional[str]:
-    """Discover peer ID by connecting to bootstrap address."""
-    # Address already contains peer ID
-    if "/p2p/" in bootstrap_addr:
-        return bootstrap_addr
+def save_bootstrap_addr(addr: str):
+    """Save bootstrap node address to file for other nodes to discover."""
+    bootstrap_log = Path("stellar_bootstrap_addrs.txt")
+    try:
+        with open(bootstrap_log, "w") as f:
+            f.write(addr + "\n")
+        print(f"Saved bootstrap address: {addr}")
+    except Exception as e:
+        print(f"Failed to save bootstrap address: {e}")
 
-    # For addresses without peer ID, we'd need to connect and discover
-    # This is more complex and typically you'd use addresses with peer IDs
-    print(f"Bootstrap address {bootstrap_addr} is missing peer ID")
-    return None
+
+def validate_bootstrap_addr(addr_str: str) -> bool:
+    """Validate that a bootstrap address has the required peer ID."""
+    try:
+        addr = Multiaddr(addr_str)
+        # Check if address contains peer ID
+        protocols = [proto.code for proto in addr.protocols()]
+        return 421 in protocols  # 421 is the protocol code for /p2p/
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

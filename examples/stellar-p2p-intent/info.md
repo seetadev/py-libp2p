@@ -2,6 +2,16 @@
 
 A reference implementation demonstrating decentralized coordination of Stellar transactions using py-libp2p. This example allows agents to exchange signed Stellar transaction intents peer-to-peer before submitting them to the Stellar network, eliminating the need for centralized coordination infrastructure.
 
+## Recent Fixes
+
+This implementation has been updated to fix connection issues between regular nodes and bootstrap nodes:
+
+- **Fixed bootstrap discovery**: Proper validation and handling of bootstrap node addresses with peer IDs
+- **Improved DHT integration**: Better routing table management and peer discovery
+- **Enhanced connection logic**: Robust bootstrap connection with proper error handling
+- **Added address persistence**: Bootstrap nodes save their addresses for other nodes to discover
+- **Fixed async patterns**: Corrected nursery usage and service lifecycle management
+
 ## Overview
 
 This implementation enables:
@@ -50,67 +60,101 @@ This implementation enables:
 
 ## Quick Start
 
-### 1. Generate Demo Accounts
+### 1. Run Demo Mode (Generate Demo Accounts)
 
 ```bash
-python main.py --demo
+python stellar-p2p-intent.py --demo
 ```
 
-This creates test Stellar keypairs and shows the commands to run the demo.
-
-> You may need to fund the sender's account with [Friendbot](https://lab.stellar.org/account/fund?$=network$id=testnet&label=Testnet&horizonUrl=https:////horizon-testnet.stellar.org&rpcUrl=https:////soroban-testnet.stellar.org&passphrase=Test%20SDF%20Network%20/;%20September%202015;;), if not done automatically.
+This generates test Stellar keypairs and shows the exact commands to run.
 
 ### 2. Start Bootstrap Node
 
 ```bash
-# Terminal 1
-python main.py --bootstrap
+# Terminal 1 - Bootstrap node
+python stellar-p2p-intent.py --bootstrap --port 4001
 ```
 
-### 3. Start Receiver (Bob)
+The bootstrap node will save its address to `stellar_bootstrap_addrs.txt` for other nodes to discover.
+
+### 3. Start Receiver Node (Bob)
 
 ```bash
-# Terminal 2 - Replace SXXXXXXX with Bob's secret key
-python main.py --secret SXXXXXXX --listen --port 4002
+# Terminal 2 - Receiver
+python stellar-p2p-intent.py 
+    --secret SXXXXXXX 
+    --listen 
+    --port 4002
 ```
 
 ### 4. Send Payment Intent (Alice)
 
 ```bash
-# Terminal 3 - Replace keys with Alice's secret and Bob's public key
-python main.py --secret SXXXXXXX --send-to GXXXXXXX --amount 10 --port 4003
+# Terminal 3 - Sender  
+python stellar-p2p-intent.py 
+    --secret SXXXXXXX 
+    --send-to GXXXXXXX 
+    --amount 10 
+    --port 4003
 ```
 
-## Usage Examples
+## Configuration Options
 
-### Basic Payment Intent
+### Environment Variables
 
 ```bash
-python main.py \
-    --secret SXXXXXXX \
-    --send-to GXXXXXXX \
-    --amount 50 \
-    --asset XLM \
+# Single bootstrap address
+export STELLAR_BOOTSTRAP_ADDR="/ip4/127.0.0.1/tcp/4001/p2p/12D3Koo..."
+
+# Multiple bootstrap addresses (comma-separated)
+export STELLAR_BOOTSTRAP_ADDRS="/ip4/127.0.0.1/tcp/4001/p2p/12D3Koo...,/ip4/127.0.0.1/tcp/4002/p2p/12D3Koo..."
+```
+
+### Configuration File
+
+Create `stellar_bootstrap.json`:
+
+```json
+{
+  "bootstrap_nodes": [
+    "/ip4/127.0.0.1/tcp/4001/p2p/12D3Koo...",
+    "/ip4/192.168.1.100/tcp/4001/p2p/12D3Koo..."
+  ]
+}
+```
+
+## Advanced Usage
+
+### Send Payment Intent
+
+```bash
+python stellar-p2p-intent.py 
+    --secret SXXXXXXX 
+    --send-to GXXXXXXX 
+    --amount 50 
+    --asset XLM 
     --port 4003
 ```
 
 ### Listen for Intents
 
 ```bash
-python main.py \
-    --secret SXXXXXXX \
-    --listen \
+python stellar-p2p-intent.py 
+    --secret SXXXXXXX 
+    --listen 
     --port 4002
 ```
 
 ### Custom Bootstrap Node
 
+**Note**: Bootstrap addresses must include peer IDs in the format `/ip4/host/tcp/port/p2p/peer_id`
+
 ```bash
-python main.py \
-    --secret SXXXXXXX \
-    --send-to GXXXXXXX \
-    --amount 10 \
-    --bootstrap-addr /ip4/192.168.1.100/tcp/4001
+python stellar-p2p-intent.py 
+    --secret SXXXXXXX 
+    --send-to GXXXXXXX 
+    --amount 10 
+    --bootstrap-addr /ip4/192.168.1.100/tcp/4001/p2p/12D3Koo...
 ```
 
 ## Protocol Specification
