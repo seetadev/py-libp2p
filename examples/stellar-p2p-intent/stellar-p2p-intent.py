@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stellar P2P Intents Example
+Stellar P2P Intents Example - Fixed Implementation
 
 A reference implementation showing how to use py-libp2p for decentralized
 coordination of Stellar transactions. Agents can exchange signed Stellar
@@ -8,27 +8,27 @@ transaction intents peer-to-peer before submitting to the network.
 
 Usage:
     # Terminal 1 - Start bootstrap node
-    python stellar_p2p_intents.py --bootstrap
+    python stellar-p2p-intent.py --bootstrap --port 4001
 
     # Terminal 2 - Start receiver (Bob)
-    python stellar_p2p_intents.py --secret SXXXXXXX --listen --port 4002
+    python stellar-p2p-intent.py --secret SXXXXXXX --listen --port 4002
 
     # Terminal 3 - Send payment intent (Alice)
-    python stellar_p2p_intents.py --secret SXXXXXXX --send-to GXXXXXXX \
+    python stellar-p2p-intent.py --secret SXXXXXXX --send-to GXXXXXXX \
         --amount 10 --port 4003
-
-Requirements:
-    pip install trio stellar-sdk py-libp2p coincurve requests
 """
 
 import trio
 import json
 import hashlib
 import argparse
+import random
 import requests
 import os
+import secrets
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from multiaddr import Multiaddr
 
 # Stellar SDK imports
@@ -45,6 +45,18 @@ from libp2p.kad_dht.kad_dht import KadDHT, DHTMode
 from libp2p.tools.utils import info_from_p2p_addr
 from libp2p.tools.async_service import background_trio_service
 import coincurve
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger("stellar-p2p-intent")
+
+# Silence noisy libraries
+logging.getLogger("multiaddr").setLevel(logging.WARNING)
+logging.getLogger("root").setLevel(logging.WARNING)
 
 
 class StellarP2PIntents:
@@ -70,114 +82,140 @@ class StellarP2PIntents:
         self.dht = None
         self.pubsub = None
         self.pending_intents = {}
-        self.nursery = None
+        self.received_intents = {}
+        self.connected_peers = set()
+        self.bootstrap_nodes = []
 
         # Create libp2p keypair from Stellar keypair
         if stellar_keypair:
-            raw_secret = stellar_keypair.raw_secret_key()
-            coincurve_priv = coincurve.PrivateKey(raw_secret)
-            libp2p_priv = Secp256k1PrivateKey(coincurve_priv)
-            self.libp2p_keypair = Libp2pKeyPair(
-                libp2p_priv, libp2p_priv.get_public_key()
-            )
+            try:
+                raw_secret = stellar_keypair.raw_secret_key()
+                coincurve_priv = coincurve.PrivateKey(raw_secret)
+                libp2p_priv = Secp256k1PrivateKey(coincurve_priv)
+                self.libp2p_keypair = Libp2pKeyPair(
+                    libp2p_priv, libp2p_priv.get_public_key()
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create libp2p keypair from Stellar key: {e}")
+                self.libp2p_keypair = create_new_key_pair(secrets.token_bytes(32))
         else:
-            self.libp2p_keypair = create_new_key_pair()
+            self.libp2p_keypair = create_new_key_pair(secrets.token_bytes(32))
 
     async def start(self, bootstrap_addrs: Optional[list] = None):
         """Start the P2P node and Stellar services."""
-        listen_addr = f"/ip4/0.0.0.0/tcp/{self.listen_port}"
-        listen_multiaddr = Multiaddr(listen_addr)
+        if self.listen_port <= 0:
+            self.listen_port = random.randint(10000, 60000)
+        logger.debug(f"Using port: {self.listen_port}")
 
-        # Create host WITHOUT bootstrap addresses
-        self.host = new_host(self.libp2p_keypair)
+        if not self.is_bootstrap:
+            server_addrs = load_bootstrap_addrs()
+            if server_addrs:
+                logger.info(f"Loaded {len(server_addrs)} bootstrap addresses from log")
+                self.bootstrap_nodes.append(server_addrs[0])
+            else:
+                logger.warning("No bootstrap addresses found in log file")
+        
+        if bootstrap_addrs:
+            for addr in bootstrap_addrs:
+                if addr not in self.bootstrap_nodes:
+                    self.bootstrap_nodes.append(addr)
+        
+        self.host = new_host(key_pair=self.libp2p_keypair)
+        listen_addr = Multiaddr(f"/ip4/127.0.0.1/tcp/{self.listen_port}")
 
-        print(
-            f"{'Bootstrap' if self.is_bootstrap else 'Regular'} node "
-            "starting..."
-        )
-        print(f"Stellar Address: {self.stellar_keypair.public_key}")
-        print(f"P2P Node ID: {self.host.get_id()}")
-        print(f"Listening on: {listen_addr}")
-
-        # Start services in nursery
-        async with trio.open_nursery() as nursery:
-            self.nursery = nursery
+        async with self.host.run([listen_addr]), trio.open_nursery() as nursery:
             # Start peerstore cleanup task
             nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
-            
-            async with self.host.run([listen_multiaddr]):
-                await trio.sleep(0.1)  # Let host initialize
 
-                # Connect to bootstrap nodes FIRST (before DHT)
-                if not self.is_bootstrap and bootstrap_addrs:
-                    await self._connect_bootstrap(bootstrap_addrs)
+            peer_id = self.host.get_id().pretty()
+            addr_str = f"/ip4/127.0.0.1/tcp/{self.listen_port}/p2p/{peer_id}"
+            await self._connect_bootstrap(self.bootstrap_nodes)
+            self.dht = KadDHT(self.host, mode=DHTMode.SERVER if self.is_bootstrap else DHTMode.CLIENT)
 
-                # Initialize DHT AFTER bootstrap connections
-                dht_mode = DHTMode.SERVER if self.is_bootstrap else DHTMode.CLIENT
-                self.dht = KadDHT(self.host, mode=dht_mode)
+            # Take all peer ids from host and add to dht
+            for peer_id in self.host.get_peerstore().peer_ids():
+                await self.dht.routing_table.add_peer(peer_id)
+            logger.info(f"Connected to bootstrap nodes: {self.host.get_connected_peers()}")
+            bootstrap_cmd = f"--bootstrap {addr_str}"
+            logger.info("To connect to this node, use: %s", bootstrap_cmd)
 
-                # Add all connected peers to DHT routing table
-                for peer_id in self.host.get_peerstore().peer_ids():
-                    await self.dht.routing_table.add_peer(peer_id)
+            # Save server address in server mode
+            if self.is_bootstrap:
+                save_bootstrap_addr(addr_str)
 
-                print(f"Connected peers after bootstrap: {len(self.host.get_connected_peers())}")
+            # Fund account if not bootstrap and has stellar keypair
+            if not self.is_bootstrap and self.stellar_keypair:
+                await self._ensure_funded()
 
-                # Start DHT using background service
-                async with background_trio_service(self.dht):
-                    await trio.sleep(0.1)  # Let DHT initialize
+            # Start DHT service
+            async with background_trio_service(self.dht):
+                gossip_router = GossipSub(
+                    protocols=[self.PROTOCOL],
+                    degree=6,
+                    degree_low=4,
+                    degree_high=12,
+                    px_peers_count=6,
+                )
+                self.pubsub = Pubsub(self.host, gossip_router)
 
-                    # Initialize PubSub AFTER DHT is running
-                    gossip_router = GossipSub(
-                        [self.PROTOCOL],
-                        10,
-                        9,
-                        11,
-                        px_peers_count=30,
+                # Subscribe to intent topic
+                await self.pubsub.subscribe(self.PROTOCOL)
+                self.pubsub.set_topic_validator(
+                    self.PROTOCOL,
+                    self._handle_message,
+                    True,
+                )
+                logger.info("PubSub initialized and subscribed to protocol")
+
+                # Start periodic status updates
+                nursery.start_soon(self._status_monitor)
+
+                # Keep running
+                try:
+                    await trio.sleep_forever()
+                except (KeyboardInterrupt, trio.Cancelled):
+                    logger.info("Shutting down...")
+                    nursery.cancel_scope.cancel()
+
+    async def _status_monitor(self):
+        """Monitor connection status and log updates."""
+        while True:
+            try:
+                current_peers = set(str(peer) for peer in self.host.get_connected_peers())
+                
+                # Log new connections
+                new_peers = current_peers - self.connected_peers
+                if new_peers:
+                    logger.info(f"New peer connections: {list(new_peers)}")
+
+                # Log disconnections
+                lost_peers = self.connected_peers - current_peers
+                if lost_peers:
+                    logger.info(f"Lost peer connections: {list(lost_peers)}")
+                self.connected_peers = current_peers
+
+                # Periodic status
+                if len(current_peers) > 0:
+                    logger.debug(
+                        f"Status - Connected: {len(current_peers)}, "
+                        f"Pending intents: {len(self.pending_intents)}, "
+                        f"Received intents: {len(self.received_intents)}"
                     )
-                    self.pubsub = Pubsub(self.host, gossip_router)
-
-                    # Subscribe to intent topic
-                    await self.pubsub.subscribe(self.PROTOCOL)
-                    self.pubsub.set_topic_validator(
-                        self.PROTOCOL,
-                        self._handle_message,
-                        True,
-                    )
-
-                    # Fund account if not bootstrap
-                    if not self.is_bootstrap:
-                        await self._ensure_funded()
-
-                    # If this is a bootstrap node, save address for others to use
-                    if self.is_bootstrap:
-                        peer_id = self.host.get_id().pretty()
-                        full_addr = f"/ip4/127.0.0.1/tcp/{self.listen_port}/p2p/{peer_id}"
-                        save_bootstrap_addr(full_addr)
-                        print(f"Bootstrap node address: {full_addr}")
-
-                    print("P2P node ready!")
-                    print(f"Connected peers: {len(self.host.get_connected_peers())}")
-
-                    # Keep running
-                    try:
-                        await trio.sleep_forever()
-                    except (KeyboardInterrupt, trio.Cancelled):
-                        print("\nShutting down...")
-                        nursery.cancel_scope.cancel()
+                
+                await trio.sleep(10)
+            except Exception as e:
+                logger.error(f"Status monitor error: {e}")
+                await trio.sleep(5)
 
     async def _connect_bootstrap(self, bootstrap_addrs: list):
         """Connect to bootstrap nodes."""
-        for addr_str in bootstrap_addrs:
+        for addr in bootstrap_addrs:
             try:
-                peer_info = info_from_p2p_addr(Multiaddr(addr_str))
-                # Add peer to peerstore first
-                self.host.get_peerstore().add_addrs(
-                    peer_info.peer_id, peer_info.addrs, 3600
-                )
-                await self.host.connect(peer_info)
-                print(f"Connected to bootstrap: {addr_str}")
+                peerInfo = info_from_p2p_addr(Multiaddr(addr))
+                self.host.get_peerstore().add_addrs(peerInfo.peer_id, peerInfo.addrs, 3600)
+                await self.host.connect(peerInfo)
             except Exception as e:
-                print(f"Failed to connect to {addr_str}: {e}")
+                logger.error(f"Failed to connect to bootstrap node {addr}: {e}")
 
     async def _ensure_funded(self):
         """Ensure the Stellar account is funded."""
@@ -185,23 +223,25 @@ class StellarP2PIntents:
             await trio.to_thread.run_sync(
                 self.server.load_account, self.stellar_keypair.public_key
             )
-            print("Stellar account already funded")
+            logger.info("Stellar account already funded")
         except NotFoundError:
-            print("Funding account via Friendbot...")
+            logger.info("Funding account via Friendbot...")
             try:
-
                 def fund_account():
                     response = requests.get(
                         f"{self.FRIENDBOT_URL}/?addr="
-                        f"{self.stellar_keypair.public_key}"
+                        f"{self.stellar_keypair.public_key}",
+                        timeout=30
                     )
                     response.raise_for_status()
                     return response.json()
 
-                await trio.to_thread.run_sync(fund_account)
-                print("Account funded successfully")
+                result = await trio.to_thread.run_sync(fund_account)
+                logger.info("Account funded successfully")
+                logger.debug(f"Friendbot response: {result}")
             except Exception as e:
-                print(f"Failed to fund account: {e}")
+                logger.error(f"Failed to fund account: {e}")
+                raise
 
     async def _handle_message(self, peer_id: str, message):
         """Handle incoming P2P messages."""
@@ -209,75 +249,113 @@ class StellarP2PIntents:
             data = json.loads(message.data.decode("utf-8"))
             msg_type = data.get("type")
 
+            logger.info(f"Received message type '{msg_type}' from {peer_id}")
+
             if msg_type == "intent":
                 await self._handle_intent(peer_id, data)
             elif msg_type == "response":
                 await self._handle_response(peer_id, data)
+            elif msg_type == "status":
+                await self._handle_status(peer_id, data)
             else:
-                print(f"Unknown message type: {msg_type}")
+                logger.warning(f"Unknown message type: {msg_type}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to decode message from {peer_id}: {e}")
         except Exception as e:
-            print(f"Error handling message: {e}")
+            logger.error(f"Error handling message from {peer_id}: {e}")
 
     async def _handle_intent(self, peer_id: str, intent_data: dict):
         """Handle received payment intents."""
-        print(f"\nReceived intent from {peer_id}")
-        print(f"   Type: {intent_data.get('intent_type', 'unknown')}")
-        print(f"   From: {intent_data.get('from', 'unknown')[:8]}...")
-        print(f"   To: {intent_data.get('to', 'unknown')[:8]}...")
-        print(
+        intent_id = intent_data.get("id", "unknown")
+        
+        logger.info(f"Processing intent {intent_id} from {peer_id}")
+        logger.info(f"   Type: {intent_data.get('intent_type', 'unknown')}")
+        logger.info(f"   From: {intent_data.get('from', 'unknown')[:8]}...")
+        logger.info(f"   To: {intent_data.get('to', 'unknown')[:8]}...")
+        logger.info(
             f"   Amount: {intent_data.get('amount')} "
             f"{intent_data.get('asset', 'XLM')}"
         )
 
+        # Store received intent
+        self.received_intents[intent_id] = {
+            "data": intent_data,
+            "peer_id": peer_id,
+            "timestamp": trio.current_time()
+        }
+
         # Validate intent
         if not self._validate_intent(intent_data):
-            print("Intent validation failed")
+            logger.warning(f"Intent {intent_id} validation failed")
+            response = {
+                "type": "response",
+                "intent_id": intent_id,
+                "from": self.stellar_keypair.public_key,
+                "accepted": False,
+                "reason": "validation_failed",
+                "timestamp": trio.current_time(),
+            }
+            await self._publish_message(response)
             return
 
         # Check if intent is for us
         if intent_data.get("to") == self.stellar_keypair.public_key:
-            print("Intent addressed to this node - auto-accepting")
+            logger.info(f"Intent {intent_id} is addressed to this node - auto-accepting")
             response = {
                 "type": "response",
-                "intent_id": intent_data["id"],
+                "intent_id": intent_id,
                 "from": self.stellar_keypair.public_key,
                 "accepted": True,
                 "timestamp": trio.current_time(),
             }
             await self._publish_message(response)
         else:
-            print("Intent not for this node - ignoring")
+            logger.info(f"Intent {intent_id} not for this node - ignoring")
 
     async def _handle_response(self, peer_id: str, response_data: dict):
         """Handle responses to our intents."""
         intent_id = response_data.get("intent_id")
         accepted = response_data.get("accepted", False)
+        reason = response_data.get("reason", "")
 
-        print(f"\nReceived response from {peer_id}")
-        print(f"   Intent ID: {intent_id}")
-        print(f"   Status: {'ACCEPTED' if accepted else 'REJECTED'}")
+        logger.info(f"Received response for intent {intent_id} from {peer_id}")
+        logger.info(f"   Status: {'ACCEPTED' if accepted else 'REJECTED'}")
+        if reason:
+            logger.info(f"   Reason: {reason}")
 
         if accepted and intent_id in self.pending_intents:
-            print("Submitting transaction to Stellar network...")
+            logger.info("Submitting transaction to Stellar network...")
             try:
-                transaction = self.pending_intents[intent_id]
+                transaction = self.pending_intents[intent_id]["transaction"]
 
                 def submit_tx():
                     response = self.server.submit_transaction(transaction)
-                    return response["hash"]
+                    return response
 
-                tx_hash = await trio.to_thread.run_sync(submit_tx)
-                print("Transaction submitted successfully!")
-                print(f"   Hash: {tx_hash}")
-                print(
+                result = await trio.to_thread.run_sync(submit_tx)
+                tx_hash = result.get("hash", result.get("id", "unknown"))
+                
+                logger.info("Transaction submitted successfully!")
+                logger.info(f"   Hash: {tx_hash}")
+                logger.info(
                     f"   Explorer: "
                     f"https://stellar.expert/explorer/testnet/tx/{tx_hash}"
                 )
 
                 # Clean up
                 del self.pending_intents[intent_id]
+                
             except Exception as e:
-                print(f"Failed to submit transaction: {e}")
+                logger.error(f"Failed to submit transaction: {e}")
+        elif not accepted:
+            logger.warning(f"Intent {intent_id} was rejected by peer")
+            # Clean up rejected intent
+            if intent_id in self.pending_intents:
+                del self.pending_intents[intent_id]
+
+    async def _handle_status(self, peer_id: str, status_data: dict):
+        """Handle status messages from peers."""
+        logger.debug(f"Status from {peer_id}: {status_data}")
 
     def _validate_intent(self, intent_data: dict) -> bool:
         """Validate a received intent."""
@@ -292,26 +370,45 @@ class StellarP2PIntents:
         ]
 
         # Check required fields
-        if not all(field in intent_data for field in required_fields):
-            print("Missing required fields in intent")
+        missing_fields = [field for field in required_fields if field not in intent_data]
+        if missing_fields:
+            logger.error(f"Missing required fields in intent: {missing_fields}")
             return False
 
-        # Check timestamp (not too old)
+        # Check timestamp (not too old or in future)
         current_time = trio.current_time()
-        if abs(current_time - intent_data["timestamp"]) > 300:  # 5 minutes
-            print("Intent timestamp is too old")
+        intent_time = intent_data["timestamp"]
+        time_diff = abs(current_time - intent_time)
+        
+        if time_diff > 600:  # 10 minutes
+            logger.error(f"Intent timestamp is too old/future: {time_diff}s")
+            return False
+
+        # Validate amount
+        try:
+            amount = float(intent_data["amount"])
+            if amount <= 0:
+                logger.error("Intent amount must be positive")
+                return False
+        except (ValueError, TypeError):
+            logger.error("Invalid amount format")
             return False
 
         # Validate XDR
         try:
             from stellar_sdk import TransactionEnvelope
-
-            TransactionEnvelope.from_xdr(
+            envelope = TransactionEnvelope.from_xdr(
                 intent_data["transaction_xdr"],
                 Network.TESTNET_NETWORK_PASSPHRASE
             )
-        except Exception:
-            print("Invalid transaction XDR")
+            
+            # Additional validation: check if transaction is properly signed
+            if not envelope.transaction.signatures:
+                logger.error("Transaction is not signed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Invalid transaction XDR: {e}")
             return False
 
         return True
@@ -321,10 +418,15 @@ class StellarP2PIntents:
     ):
         """Create and send a payment intent."""
         try:
-            print(
-                f"\nCreating payment intent: {amount} {asset_code}"
+            logger.info(
+                f"Creating payment intent: {amount} {asset_code}"
                 f" to {destination[:8]}..."
             )
+
+            # Verify we have connected peers
+            if len(self.host.get_connected_peers()) == 0:
+                logger.error("No connected peers to send intent to!")
+                return False
 
             # Create transaction
             def create_tx():
@@ -341,9 +443,10 @@ class StellarP2PIntents:
                     TransactionBuilder(
                         source_account=source_account,
                         network_passphrase=Network.TESTNET_NETWORK_PASSPHRASE,
+                        base_fee=100,  # Explicit base fee
                     )
                     .append_payment_op(destination, asset, amount)
-                    .set_timeout(30)
+                    .set_timeout(300)  # 5 minute timeout
                     .build()
                 )
                 transaction.sign(self.stellar_keypair)
@@ -378,22 +481,49 @@ class StellarP2PIntents:
             }
 
             # Store pending intent
-            self.pending_intents[intent_id] = transaction
+            self.pending_intents[intent_id] = {
+                "transaction": transaction,
+                "intent_data": intent,
+                "created_at": trio.current_time()
+            }
 
             # Publish intent
             await self._publish_message(intent)
-            print(f"Payment intent published: {intent_id}")
+            logger.info(f"Payment intent published: {intent_id}")
+            logger.info(f"Waiting for response from peers...")
+            
+            return True
 
         except Exception as e:
-            print(f"Failed to create payment intent: {e}")
+            logger.error(f"Failed to create payment intent: {e}")
+            return False
+
+    async def send_status_update(self):
+        """Send status update to network."""
+        status = {
+            "type": "status",
+            "peer_id": str(self.host.get_id()),
+            "stellar_address": self.stellar_keypair.public_key,
+            "connected_peers": len(self.host.get_connected_peers()),
+            "pending_intents": len(self.pending_intents),
+            "timestamp": trio.current_time(),
+        }
+        await self._publish_message(status)
 
     async def _publish_message(self, message: dict):
         """Publish a message to the P2P network."""
         try:
-            message_bytes = json.dumps(message).encode("utf-8")
+            if not self.pubsub:
+                logger.error("PubSub not initialized - cannot publish message")
+                return False
+                
+            message_bytes = json.dumps(message, sort_keys=True).encode("utf-8")
             await self.pubsub.publish(self.PROTOCOL, message_bytes)
+            logger.debug(f"Published message type: {message.get('type')}")
+            return True
         except Exception as e:
-            print(f"Failed to publish message: {e}")
+            logger.error(f"Failed to publish message: {e}")
+            return False
 
 
 async def main():
@@ -408,8 +538,8 @@ async def main():
     parser.add_argument("--port", type=int, default=4001, help="Listen port")
     parser.add_argument(
         "--bootstrap-addr",
-        default="/ip4/127.0.0.1/tcp/4001",
-        help="Bootstrap node address",
+        action="append",
+        help="Bootstrap node address (can be used multiple times)",
     )
 
     # Actions
@@ -426,8 +556,18 @@ async def main():
     parser.add_argument(
         "--demo", action="store_true", help="Run demo (create test accounts)"
     )
+    
+    # Debug options
+    parser.add_argument(
+        "--verbose", action="store_true", help="Enable verbose logging"
+    )
 
     args = parser.parse_args()
+
+    # Set logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
 
     # Demo mode - create test accounts
     if args.demo:
@@ -444,7 +584,7 @@ async def main():
         print(f"   Secret:  {bob.secret}")
 
         print("\nDemo Commands:")
-        print(f"1. Bootstrap: python {__file__} --bootstrap")
+        print(f"1. Bootstrap: python {__file__} --bootstrap --port 4001")
         print(
             f"2. Bob:       python {__file__} --secret {bob.secret} "
             "--listen --port 4002"
@@ -456,7 +596,14 @@ async def main():
         return
 
     # Create node
-    stellar_keypair = Keypair.from_secret(args.secret) if args.secret else None
+    stellar_keypair = None
+    if args.secret:
+        try:
+            stellar_keypair = Keypair.from_secret(args.secret)
+        except Exception as e:
+            logger.error(f"Invalid Stellar secret key: {e}")
+            return
+
     node = StellarP2PIntents(
         stellar_keypair=stellar_keypair,
         listen_port=args.port,
@@ -466,111 +613,79 @@ async def main():
     try:
         if args.bootstrap:
             # Bootstrap node
+            logger.info("Starting bootstrap node...")
             await node.start()
+            
         elif args.send_to:
             # Sender node
-            bootstrap_addrs = get_bootstrap_addresses()
-            valid_bootstrap_addrs = []
-
-            for addr in bootstrap_addrs:
-                if validate_bootstrap_addr(addr):
-                    valid_bootstrap_addrs.append(addr)
-                else:
-                    print(f"Skipping invalid bootstrap address: {addr}")
-
-            if not valid_bootstrap_addrs:
-                print("No valid bootstrap addresses found. Please ensure:")
-                print("1. Bootstrap node is running")
-                print("2. Bootstrap addresses include peer IDs")
-                print("3. Use format: /ip4/127.0.0.1/tcp/4001/p2p/<peer_id>")
+            bootstrap_addrs = load_bootstrap_addrs()
+            if not bootstrap_addrs:
+                logger.error("No bootstrap addresses found for sender node!")
+                logger.error("Please ensure:")
+                logger.error("1. Bootstrap node is running")
+                logger.error("2. Use --bootstrap-addr or set environment variables")
                 return
 
-            # Start node in background and send payment
+            logger.info(f"Using bootstrap addresses: {bootstrap_addrs}")
+
+            # Start node and send payment
             async with trio.open_nursery() as nursery:
-                nursery.start_soon(node.start, valid_bootstrap_addrs)
-                await trio.sleep(3)  # Let node initialize and connect
+                nursery.start_soon(node.start, bootstrap_addrs)
+                await trio.sleep(8)  # Let node initialize and connect properly
+
+                # Verify connection before sending
+                if len(node.host.get_connected_peers()) == 0:
+                    logger.error("Failed to connect to any peers!")
+                    nursery.cancel_scope.cancel()
+                    return
 
                 # Send payment
-                await node.send_payment_intent(
+                success = await node.send_payment_intent(
                     args.send_to,
                     args.amount,
                     args.asset,
                 )
-                await trio.sleep(10)  # Wait for response
+                
+                if success:
+                    logger.info("Waiting for response...")
+                    await trio.sleep(30)  # Wait for response
+                else:
+                    logger.error("Failed to send payment intent")
+                    
                 nursery.cancel_scope.cancel()
 
         elif args.listen:
             # Receiver node
-            bootstrap_addrs = get_bootstrap_addresses()
-            valid_bootstrap_addrs = []
-
-            for addr in bootstrap_addrs:
-                if validate_bootstrap_addr(addr):
-                    valid_bootstrap_addrs.append(addr)
-                else:
-                    print(f"Skipping invalid bootstrap address: {addr}")
-
-            if not valid_bootstrap_addrs:
-                print("No valid bootstrap addresses found. Please ensure:")
-                print("1. Bootstrap node is running")
-                print("2. Bootstrap addresses include peer IDs")
-                print("3. Use format: /ip4/127.0.0.1/tcp/4001/p2p/<peer_id>")
+            bootstrap_addrs = load_bootstrap_addrs()
+            if not bootstrap_addrs:
+                logger.error("No bootstrap addresses found for receiver node!")
+                logger.error("Please ensure:")
+                logger.error("1. Bootstrap node is running")
+                logger.error("2. Use --bootstrap-addr or set environment variables")
                 return
 
-            await node.start(valid_bootstrap_addrs)
+            logger.info(f"Using bootstrap addresses: {bootstrap_addrs}")
+            await node.start(bootstrap_addrs)
+            
         else:
             print("Must specify --bootstrap, --listen, --send-to, or --demo")
 
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        logger.info("Goodbye!")
+    except Exception as e:
+        logger.error(f"Application error: {e}", exc_info=True)
 
 
-def get_bootstrap_addresses():
-    """Get bootstrap node addresses from various sources."""
-    # 1. Environment variables (highest priority)
-    env_addrs = os.getenv("STELLAR_BOOTSTRAP_ADDRS")
-    if env_addrs:
-        return [addr.strip() for addr in env_addrs.split(",")]
-
-    # 2. Single environment variable
-    single_addr = os.getenv("STELLAR_BOOTSTRAP_ADDR")
-    if single_addr:
-        return [single_addr]
-
-    # 3. Configuration file
-    config_file = Path("stellar_bootstrap.json")
-    if config_file.exists():
-        try:
-            with open(config_file) as f:
-                config = json.load(f)
-                if "bootstrap_nodes" in config:
-                    return config["bootstrap_nodes"]
-        except Exception as e:
-            print(f"Failed to load config file: {e}")
-
-    # 4. Load from local bootstrap log file
+def load_bootstrap_addrs() -> List[str]:
+    """Load bootstrap addresses from the log file."""
     bootstrap_log = Path("stellar_bootstrap_addrs.txt")
     if bootstrap_log.exists():
         try:
             with open(bootstrap_log) as f:
-                addrs = [line.strip() for line in f if line.strip()]
-                if addrs:
-                    return addrs
+                return [line.strip() for line in f if line.strip()]
         except Exception as e:
-            print(f"Failed to load bootstrap log: {e}")
-
-    # 5. Well-known production addresses (if any)
-    production_bootstraps = [
-        # These would be real addresses of hosted bootstrap nodes
-        # "/dns4/bootstrap1.stellar-intents.org/tcp/4001/p2p/12D3Koo...",
-        # "/dns4/bootstrap2.stellar-intents.org/tcp/4001/p2p/12D3Koo...",
-    ]
-
-    if production_bootstraps:
-        return production_bootstraps
-
-    # 6. Fallback to localhost for development
-    return ["/ip4/127.0.0.1/tcp/4001"]
+            logger.warning(f"Failed to load bootstrap addresses: {e}")
+    return []
 
 
 def save_bootstrap_addr(addr: str):
@@ -579,9 +694,9 @@ def save_bootstrap_addr(addr: str):
     try:
         with open(bootstrap_log, "w") as f:
             f.write(addr + "\n")
-        print(f"Saved bootstrap address: {addr}")
+        logger.info(f"Saved bootstrap address to log file: {addr}")
     except Exception as e:
-        print(f"Failed to save bootstrap address: {e}")
+        logger.error(f"Failed to save bootstrap address: {e}")
 
 
 def validate_bootstrap_addr(addr_str: str) -> bool:
