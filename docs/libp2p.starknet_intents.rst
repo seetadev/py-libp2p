@@ -13,7 +13,7 @@ A reference implementation of intent-based coordination for Starknet dApps using
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-cd examples/starknet_intents
+cd libp2p/starknet_intents
 ````
 
 Demo

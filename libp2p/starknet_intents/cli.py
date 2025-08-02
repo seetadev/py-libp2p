@@ -1,12 +1,12 @@
 import argparse
 
-from peer_node import run_peer
 import trio_asyncio
 
-from examples.starknet_intents.bootsrap_node import run_bootstrap
+from libp2p.peer.peer_node import run_peer
+from libp2p.starknet_intents.bootsrap_node import run_bootstrap
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["bootstrap", "peer"])
     parser.add_argument(

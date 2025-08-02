@@ -1,14 +1,14 @@
 import json
 import logging
 
-from discovery import bootstrap_to_peer
-from intents import create_intent
 from multiaddr import Multiaddr
-from pubsub_intents import IntentPubSub
 import trio
 import trio_asyncio
 
 from libp2p import new_host
+from libp2p.pubsub.pubsub_intents import IntentPubSub
+from libp2p.starknet_intents.discovery import bootstrap_to_peer
+from libp2p.starknet_intents.intents import create_intent
 
 logger = logging.getLogger("peer")
 logging.basicConfig(level=logging.INFO)
@@ -16,14 +16,13 @@ logging.basicConfig(level=logging.INFO)
 TOPIC = "/starknet/intent/1.0.0"
 
 
-async def run_peer(bootstrap_addr: str):
+async def run_peer(bootstrap_addr: str) -> None:
     """
     Launch a libp2p peer node, connect to bootstrap,
     subscribe to the intent topic, and publish a test intent.
     """
     host = new_host()
 
-    # Ensure peer listens on a port as well (same port used by bootstrap for NAT)
     async with host.run(listen_addrs=[Multiaddr("/ip4/0.0.0.0/tcp/0")]):
         logger.info("[PEER] ID: %s", host.get_id())
 
@@ -31,7 +30,7 @@ async def run_peer(bootstrap_addr: str):
 
         pub = IntentPubSub(host, host.get_peerstore())
 
-        async def handler(intent: str):
+        async def handler(intent: str) -> None:
             logger.info("[PEER RECEIVED] %s", intent)
 
         async with trio.open_nursery() as nursery:
