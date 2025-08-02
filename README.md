@@ -12,7 +12,6 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/libp2p/py-libp2p/tox.yml?branch=main&label=build%20status)](https://github.com/libp2p/py-libp2p/actions/workflows/tox.yml)
 [![Docs build](https://readthedocs.org/projects/py-libp2p/badge/?version=latest)](http://py-libp2p.readthedocs.io/en/latest/?badge=latest)
 
-
 Read more in the [documentation on ReadTheDocs](https://py-libp2p.readthedocs.io/). [View the release notes](https://py-libp2p.readthedocs.io/en/latest/release_notes.html).
 
 ## Maintainers
@@ -43,9 +42,9 @@ ______________________________________________________________________
 
 | **NAT Traversal**             | **Status** |
 | ----------------------------- | :--------: |
-| **`libp2p-circuit-relay-v2`** |    ✅     |
-| **`libp2p-autonat`**          |    ✅     |
-| **`libp2p-hole-punching`**    |    🌱     |
+| **`libp2p-circuit-relay-v2`** |     ✅     |
+| **`libp2p-autonat`**          |     ✅     |
+| **`libp2p-hole-punching`**    |     🌱     |
 
 ______________________________________________________________________
 
@@ -62,9 +61,9 @@ ______________________________________________________________________
 
 | **Discovery**        | **Status** |
 | -------------------- | :--------: |
-| **`bootstrap`**      |     🌱    |
+| **`bootstrap`**      |     🌱     |
 | **`random-walk`**    |     ❌     |
-| **`mdns-discovery`** |     ✅    |
+| **`mdns-discovery`** |     ✅     |
 | **`rendezvous`**     |     ❌     |
 
 ______________________________________________________________________
