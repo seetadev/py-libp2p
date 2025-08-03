@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "@1inch/fusion-sdk": "^2.3.6",
+    "@chainsafe/libp2p-gossipsub": "^14.1.1",
+    "@chainsafe/libp2p-noise": "^16.1.4",
+    "@chainsafe/libp2p-yamux": "^7.0.4",
+    "@libp2p/identify": "^3.0.38",
+    "@libp2p/pubsub-peer-discovery": "^11.0.2",
+    "@libp2p/tcp": "^10.1.18",
+    "libp2p": "^2.9.0"
+  }
+}
