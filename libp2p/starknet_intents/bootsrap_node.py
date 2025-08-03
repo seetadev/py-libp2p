@@ -6,7 +6,7 @@ from multiaddr import Multiaddr
 import trio_asyncio
 
 from libp2p import new_host
-from libp2p.pubsub.pubsub_intents import IntentPubSub
+from libp2p.starknet_intents.pubsub_intents import IntentPubSub
 
 TOPIC = "/starknet/intent/1.0.0"
 LISTEN_ADDR = "/ip4/0.0.0.0/tcp/9000"
