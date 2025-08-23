@@ -52,11 +52,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler()],
 )
-logger = logging.getLogger("stellar-p2p-intent")
-
-# Silence noisy libraries
-logging.getLogger("multiaddr").setLevel(logging.WARNING)
-logging.getLogger("root").setLevel(logging.WARNING)
+logger = logging.getLogger(__file__)
 
 
 class StellarP2PIntents:
@@ -107,14 +103,14 @@ class StellarP2PIntents:
             self.listen_port = random.randint(10000, 60000)
         logger.debug(f"Using port: {self.listen_port}")
 
-        if not self.is_bootstrap:
+        if not self.is_bootstrap and not bootstrap_addrs:
             server_addrs = load_bootstrap_addrs()
             if server_addrs:
                 logger.info(f"Loaded {len(server_addrs)} bootstrap addresses from log")
                 self.bootstrap_nodes.append(server_addrs[0])
             else:
                 logger.warning("No bootstrap addresses found in log file")
-        
+
         if bootstrap_addrs:
             for addr in bootstrap_addrs:
                 if addr not in self.bootstrap_nodes:
@@ -128,6 +124,7 @@ class StellarP2PIntents:
             nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
 
             peer_id = self.host.get_id().pretty()
+            print(peer_id)
             addr_str = f"/ip4/127.0.0.1/tcp/{self.listen_port}/p2p/{peer_id}"
             await self._connect_bootstrap(self.bootstrap_nodes)
             self.dht = KadDHT(self.host, mode=DHTMode.SERVER if self.is_bootstrap else DHTMode.CLIENT)
