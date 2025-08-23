@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""
-Stellar P2P Intents Example - Fixed Implementation
-
-A reference implementation showing how to use py-libp2p for decentralized
-coordination of Stellar transactions. Agents can exchange signed Stellar
-transaction intents peer-to-peer before submitting to the network.
-
-Usage:
-    # Terminal 1 - Start bootstrap node
-    python stellar-p2p-intent.py --bootstrap --port 4001
-
-    # Terminal 2 - Start receiver (Bob)
-    python stellar-p2p-intent.py --secret SXXXXXXX --listen --port 4002
-
-    # Terminal 3 - Send payment intent (Alice)
-    python stellar-p2p-intent.py --secret SXXXXXXX --send-to GXXXXXXX \
-        --amount 10 --port 4003
-"""
-
 import trio
 import json
 import hashlib
