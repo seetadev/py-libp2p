@@ -124,7 +124,6 @@ class StellarP2PIntents:
             nursery.start_soon(self.host.get_peerstore().start_cleanup_task, 60)
 
             peer_id = self.host.get_id().pretty()
-            print(peer_id)
             addr_str = f"/ip4/127.0.0.1/tcp/{self.listen_port}/p2p/{peer_id}"
             await self._connect_bootstrap(self.bootstrap_nodes)
             self.dht = KadDHT(self.host, mode=DHTMode.SERVER if self.is_bootstrap else DHTMode.CLIENT)
