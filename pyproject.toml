@@ -86,9 +86,10 @@ dev = [
     "pyrefly (>=0.17.1,<0.18.0)",
 ]
 docs = [
+    "numpy", 
     "sphinx>=6.0.0",
     "sphinx_rtd_theme>=1.0.0",
-    "towncrier>=24,<25",
+    "towncrier>=24,<25", 
     "tomli; python_version < '3.11'",
 ]
 test = [
