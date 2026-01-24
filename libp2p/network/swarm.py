@@ -39,6 +39,7 @@ from libp2p.peer.peerstore import (
     PeerStoreError,
 )
 from libp2p.rcmgr.manager import ResourceManager
+from libp2p.security.pnet.protector import new_protected_conn
 from libp2p.tools.async_service import (
     Service,
 )
@@ -103,11 +104,13 @@ class Swarm(Service, INetworkService):
         transport: ITransport,
         retry_config: RetryConfig | None = None,
         connection_config: ConnectionConfig | QUICTransportConfig | None = None,
+        psk: str | None = None,
     ):
         self.self_id = peer_id
         self.peerstore = peerstore
         self.upgrader = upgrader
         self.transport = transport
+        self.psk = psk
 
         # Enhanced: Initialize retry and connection configuration
         self.retry_config = retry_config or RetryConfig()
@@ -137,11 +140,19 @@ class Swarm(Service, INetworkService):
         async with trio.open_nursery() as nursery:
             # Create a nursery for listener tasks.
             self.listener_nursery = nursery
-            self.event_listener_nursery_created.set()
 
+            # Set background nursery BEFORE setting the event
+            # This ensures transports have the nursery when they check
             if isinstance(self.transport, QUICTransport):
                 self.transport.set_background_nursery(nursery)
                 self.transport.set_swarm(self)
+            elif hasattr(self.transport, "set_background_nursery"):
+                # WebSocket transport also needs background nursery
+                # for connection management
+                self.transport.set_background_nursery(nursery)  # type: ignore[attr-defined]
+
+            # Now set the event after nursery is set on transport
+            self.event_listener_nursery_created.set()
 
             try:
                 await self.manager.wait_finished()
@@ -355,6 +366,10 @@ class Swarm(Service, INetworkService):
         try:
             addr = Multiaddr(f"{addr}/p2p/{peer_id}")
             raw_conn = await self.transport.dial(addr)
+
+            # Enable PNET if psk is provvided
+            if self.psk is not None:
+                raw_conn = new_protected_conn(raw_conn, self.psk)
         except OpenConnectionError as error:
             logger.debug("fail to dial peer %s over base transport", peer_id)
             # Release pre-upgrade scope on failure
@@ -399,11 +414,12 @@ class Swarm(Service, INetworkService):
         try:
             secured_conn = await self.upgrader.upgrade_security(raw_conn, True, peer_id)
         except SecurityUpgradeFailure as error:
-            logger.debug("failed to upgrade security for peer %s", peer_id)
+            logger.error("failed to upgrade security for peer %s: %s", peer_id, error)
             await raw_conn.close()
             raise SwarmException(
-                f"failed to upgrade security for peer {peer_id}"
+                f"failed to upgrade security for peer {peer_id}: {error}"
             ) from error
+        logger.debug("Swarm: security upgrade completed for peer %s", peer_id)
 
         logger.debug("upgraded security for peer %s", peer_id)
 
@@ -414,6 +430,7 @@ class Swarm(Service, INetworkService):
             await secured_conn.close()
             raise SwarmException(f"failed to upgrade mux for peer {peer_id}") from error
 
+        logger.debug("Swarm: muxer upgrade completed for peer %s", peer_id)
         logger.debug("upgraded mux for peer %s", peer_id)
 
         # Pass endpoint IP to resource manager for outbound
@@ -452,7 +469,7 @@ class Swarm(Service, INetworkService):
                 pass
 
         swarm_conn = await self.add_conn(muxed_conn)
-        logger.debug("successfully dialed peer %s", peer_id)
+        logger.debug("Swarm: successfully dialed peer %s", peer_id)
         return swarm_conn
 
     async def dial_addr(self, addr: Multiaddr, peer_id: ID) -> INetConn:
@@ -678,21 +695,33 @@ class Swarm(Service, INetworkService):
         :raises SwarmException: raised when security or muxer upgrade fails
         :return: network connection with security and multiplexing established
         """
+        logger.debug("upgrade_inbound_raw_conn: starting for %s", maddr)
+        # Enable PNET is psk is provided
+        if self.psk is not None:
+            raw_conn = new_protected_conn(raw_conn, self.psk)
+
         # secure the conn and then mux the conn
         try:
+            logger.debug("upgrade_inbound_raw_conn: upgrading security for %s", maddr)
             secured_conn = await self.upgrader.upgrade_security(raw_conn, False)
+            logger.debug("upgrade_inbound: security done for %s", maddr)
         except SecurityUpgradeFailure as error:
-            logger.error("failed to upgrade security for peer at %s", maddr)
+            logger.error("failed to upgrade security for peer at %s: %s", maddr, error)
             await raw_conn.close()
             raise SwarmException(
                 f"failed to upgrade security for peer at {maddr}"
             ) from error
         peer_id = secured_conn.get_remote_peer()
+        logger.debug(
+            "upgrade_inbound: peer=%s initiator=%s", peer_id, secured_conn.is_initiator
+        )
 
         try:
+            logger.debug("upgrade_inbound: muxer upgrade for %s", peer_id)
             muxed_conn = await self.upgrader.upgrade_connection(secured_conn, peer_id)
+            logger.debug("upgrade_inbound: muxer done for %s", peer_id)
         except MuxerUpgradeFailure as error:
-            logger.error("fail to upgrade mux for peer %s", peer_id)
+            logger.error("fail to upgrade mux for peer %s: %s", peer_id, error)
             await secured_conn.close()
             raise SwarmException(f"fail to upgrade mux for peer {peer_id}") from error
         logger.debug("upgraded mux for peer %s", peer_id)
@@ -872,8 +901,23 @@ class Swarm(Service, INetworkService):
         if conn_scope is not None and not hasattr(muxed_conn, "set_resource_scope"):
             swarm_conn.set_resource_scope(conn_scope)  # type: ignore
         logger.debug("Swarm::add_conn | starting muxed connection")
+        muxed_type = type(muxed_conn)
+        muxed_peer_id = muxed_conn.peer_id
+        logger.debug(
+            f"Swarm::add_conn | muxed_conn type: {muxed_type}, peer_id: {muxed_peer_id}"
+        )
         self.manager.run_task(muxed_conn.start)
+        logger.debug(
+            f"Swarm::add_conn | waiting for event_started for peer {muxed_conn.peer_id}"
+        )
         await muxed_conn.event_started.wait()
+        logger.debug(
+            f"Swarm::add_conn | event_started received for peer {muxed_conn.peer_id}"
+        )
+        # For QUIC connections, also verify connection is established
+        if isinstance(muxed_conn, QUICConnection):
+            if not muxed_conn.is_established:
+                await muxed_conn._connected_event.wait()
         logger.debug("Swarm::add_conn | starting swarm connection")
         self.manager.run_task(swarm_conn.start)
         await swarm_conn.event_started.wait()
