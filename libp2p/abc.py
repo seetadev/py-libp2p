@@ -224,6 +224,15 @@ class IMuxedConn(ABC):
 
     @property
     @abstractmethod
+    def is_established(self) -> bool:
+        """
+        Check if the connection is fully established and ready for streams.
+
+        :return: True if the connection is established, otherwise False.
+        """
+
+    @property
+    @abstractmethod
     def is_closed(self) -> bool:
         """
         Check if the connection is fully closed.
@@ -287,13 +296,12 @@ class IMuxedStream(ReadWriteCloser, AsyncContextManager["IMuxedStream"]):
         """
 
     @abstractmethod
-    def set_deadline(self, ttl: int) -> bool:
+    def set_deadline(self, ttl: int) -> None:
         """
         Set a deadline for the stream.
 
         :param ttl: Time-to-live for the stream in seconds.
-        :return: True if the deadline was set successfully,
-            otherwise False.
+        :raises ValueError: if ttl is invalid (e.g. negative).
         """
 
     @abstractmethod
@@ -1413,21 +1421,25 @@ class IListener(ABC):
     """
 
     @abstractmethod
-    async def listen(self, maddr: Multiaddr, nursery: trio.Nursery) -> bool:
+    async def listen(self, maddr: Multiaddr) -> None:
         """
         Start listening on the specified multiaddress.
+
+        The listener manages its own background tasks internally and keeps
+        them alive until :meth:`close` is called.  Callers do not need to
+        supply a nursery.
 
         Parameters
         ----------
         maddr : Multiaddr
             The multiaddress on which to listen.
-        nursery : trio.Nursery
-            The nursery for spawning listening tasks.
 
-        Returns
-        -------
-        bool
-            True if the listener started successfully, otherwise False.
+        Raises
+        ------
+        Exception
+            Transport-specific listener exception, such as
+            ``OpenConnectionError`` (TCP/WebSocket) or ``QUICListenError`` (QUIC),
+            if listening fails (e.g. missing/invalid port or failed start).
 
         """
 
@@ -1992,12 +2004,16 @@ class IHost(ABC):
     @abstractmethod
     def get_addrs(self) -> list[Multiaddr]:
         """
-        Retrieve all multiaddresses on which the host is listening.
+        Return the addresses this host advertises to other peers.
+
+        These may differ from the actual listen addresses when
+        ``announce_addrs`` is configured. Each address includes a
+        ``/p2p/{peer_id}`` suffix.
 
         Returns
         -------
         list[Multiaddr]
-            A list of multiaddresses.
+            A list of advertised multiaddresses, each with a ``/p2p/{peer_id}`` suffix.
 
         """
 
