@@ -31,13 +31,11 @@ from ..serialization import (
     deserialize_latency,
     deserialize_metadata,
     deserialize_protocols,
-    deserialize_record_state,
     serialize_addresses,
     serialize_envelope,
     serialize_latency,
     serialize_metadata,
     serialize_protocols,
-    serialize_record_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -281,7 +279,8 @@ class SyncPersistentPeerStore(IPeerStore):
                     record_key = self._get_peer_record_key(peer_id)
                     record_data = self.datastore.get(record_key)
                     if record_data:
-                        record_state = deserialize_record_state(record_data)
+                        envelope = deserialize_envelope(record_data)
+                        record_state = PeerRecordState(envelope, envelope.record().seq)
                         self.peer_record_map[peer_id] = record_state
                         return record_state
                 except (SerializationError, KeyError, ValueError) as e:
@@ -303,7 +302,7 @@ class SyncPersistentPeerStore(IPeerStore):
         """
         try:
             record_key = self._get_peer_record_key(peer_id)
-            record_data = serialize_record_state(record_state)
+            record_data = serialize_envelope(record_state.envelope)
             self.datastore.put(record_key, record_data)
             self.peer_record_map[peer_id] = record_state
             self._maybe_sync()
