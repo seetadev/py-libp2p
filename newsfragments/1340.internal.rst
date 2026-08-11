@@ -1,0 +1,7 @@
+Added dedicated unit tests for the rcmgr submodules that previously had
+no direct coverage: ``allowlist``, ``circuit_breaker``,
+``connection_lifecycle``, ``connection_pool``, ``connection_tracker``,
+``enhanced_errors``, ``exceptions``, ``graceful_degradation``,
+``memory_limits``, ``memory_pool``, ``prometheus_exporter``,
+``protocol_rate_limiter``, and ``token_bucket``. The new tests cover
+public APIs, validation, and the documented edge cases.
