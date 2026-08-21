@@ -83,3 +83,27 @@ def test_filecoin_message_id_is_deterministic_blake2b() -> None:
     msg = SimpleNamespace(data=b"lotus-parity")
     expected = hashlib.blake2b(b"lotus-parity", digest_size=32).digest()
     assert filecoin_message_id(msg) == expected
+
+
+def test_filecoin_topic_helpers_use_genesis_names() -> None:
+    from libp2p.filecoin.constants import blocks_topic, dht_protocol_name, messages_topic
+    from libp2p.filecoin.networks import get_network_preset
+
+    # mainnet alias maps to testnetnet genesis
+    assert blocks_topic(get_network_preset("mainnet").genesis_network_name) == "/fil/blocks/testnetnet"
+    assert messages_topic(get_network_preset("calibnet").genesis_network_name) == "/fil/msgs/calibrationnet"
+    assert str(dht_protocol_name("testnetnet")) == "/fil/kad/testnetnet"
+
+
+def test_build_filecoin_pubsub_wires_strict_signing_and_blake2b() -> None:
+    # No network needed — inspect constructor wiring via mock host
+    from unittest.mock import MagicMock
+
+    from libp2p.filecoin.constants import filecoin_message_id
+    from libp2p.filecoin.pubsub import build_filecoin_pubsub
+
+    mock_host = MagicMock()
+    pubsub = build_filecoin_pubsub(host=mock_host, network_name="testnetnet")
+    assert pubsub.strict_signing is True
+    # msg_id_constructor should be filecoin_message_id (blake2b) — wired as _msg_id_constructor internally
+    assert pubsub._msg_id_constructor is filecoin_message_id
