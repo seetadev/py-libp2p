@@ -41,6 +41,32 @@ def test_build_filecoin_gossipsub_default_params() -> None:
     assert gossipsub.do_px is False
 
 
+def test_build_filecoin_gossipsub_mesh_details() -> None:
+    gossipsub = build_filecoin_gossipsub(network_name="testnetnet")
+    # Parity: node/modules/lp2p/pubsub.go:24
+    assert gossipsub.heartbeat_interval == 1
+    assert gossipsub.heartbeat_initial_delay == 0.1
+    assert gossipsub.gossip_window == 3
+    assert gossipsub.time_to_live == 60
+    assert gossipsub.gossip_history == 10  # via mcache.history_size ==10
+    assert gossipsub.mcache.history_size == 10
+    assert [str(p) for p in gossipsub.protocols] == [
+        "/meshsub/2.0.0",
+        "/meshsub/1.2.0",
+        "/meshsub/1.1.0",
+        "/meshsub/1.0.0",
+    ]
+
+
+def test_filecoin_topic_score_reference_documented() -> None:
+    from libp2p.filecoin.pubsub import FILECOIN_TOPIC_SCORE_REFERENCE
+
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["blocks"]["topic_weight"] == 0.1
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["blocks"]["first_message_deliveries_weight"] == 5.0
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["messages"]["first_message_deliveries_weight"] == 0.5
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["drand"]["topic_weight"] == 0.5
+
+
 def test_build_filecoin_gossipsub_bootstrapper_params() -> None:
     gossipsub = build_filecoin_gossipsub(
         network_name="testnetnet",
@@ -57,3 +83,27 @@ def test_filecoin_message_id_is_deterministic_blake2b() -> None:
     msg = SimpleNamespace(data=b"lotus-parity")
     expected = hashlib.blake2b(b"lotus-parity", digest_size=32).digest()
     assert filecoin_message_id(msg) == expected
+
+
+def test_filecoin_topic_helpers_use_genesis_names() -> None:
+    from libp2p.filecoin.constants import blocks_topic, dht_protocol_name, messages_topic
+    from libp2p.filecoin.networks import get_network_preset
+
+    # mainnet alias maps to testnetnet genesis
+    assert blocks_topic(get_network_preset("mainnet").genesis_network_name) == "/fil/blocks/testnetnet"
+    assert messages_topic(get_network_preset("calibnet").genesis_network_name) == "/fil/msgs/calibrationnet"
+    assert str(dht_protocol_name("testnetnet")) == "/fil/kad/testnetnet"
+
+
+def test_build_filecoin_pubsub_wires_strict_signing_and_blake2b() -> None:
+    # No network needed — inspect constructor wiring via mock host
+    from unittest.mock import MagicMock
+
+    from libp2p.filecoin.constants import filecoin_message_id
+    from libp2p.filecoin.pubsub import build_filecoin_pubsub
+
+    mock_host = MagicMock()
+    pubsub = build_filecoin_pubsub(host=mock_host, network_name="testnetnet")
+    assert pubsub.strict_signing is True
+    # msg_id_constructor should be filecoin_message_id (blake2b) — wired as _msg_id_constructor internally
+    assert pubsub._msg_id_constructor is filecoin_message_id

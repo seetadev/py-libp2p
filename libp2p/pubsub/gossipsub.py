@@ -94,6 +94,8 @@ class GossipSub(IPubsubRouter, Service):
     degree_low: int
 
     time_to_live: int
+    gossip_window: int
+    gossip_history: int
 
     mesh: dict[str, set[ID]]
     fanout: dict[str, set[ID]]
@@ -214,6 +216,8 @@ class GossipSub(IPubsubRouter, Service):
 
         # Create message cache
         self.mcache = MessageCache(gossip_window, gossip_history)
+        self.gossip_window = gossip_window
+        self.gossip_history = gossip_history
 
         # Create heartbeat timer
         self.heartbeat_initial_delay = heartbeat_initial_delay
