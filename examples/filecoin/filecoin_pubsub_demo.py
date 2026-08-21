@@ -1,3 +1,30 @@
+"""
+Filecoin Pubsub Observer Demo
+=============================
+
+This script demonstrates a py-libp2p gossipsub node connecting to the 
+Filecoin network (mainnet/calibnet) as a read-only observer.
+
+Filecoin Mesh Parameters (Aligned with libp2p.filecoin presets):
+----------------------------------------------------------------
+- Degree (D): 8 (Target number of peers in the mesh)
+- Degree Low (D_low): 6 (Lower bound before grafting new peers)
+- Degree High (D_high): 12 (Upper bound before pruning peers)
+- Gossip Window: 3
+- Gossip History: 10
+- Heartbeat Interval: 1s
+
+Message Validation Expectations:
+--------------------------------
+In Filecoin, GossipSub heavily relies on strict message validation. 
+A full implementation must validate payloads against the current chain state 
+(e.g., verifying block signatures and miner eligibility). 
+
+Because invalid messages propagate quickly, Filecoin applies a severe penalty 
+(e.g., -1000.0) to a peer's score for invalid message deliveries. This rapidly 
+graylists malicious nodes, protecting the mesh from spam. This script acts as 
+a read-only observer, meaning it drops payloads to stdout without broadcasting.
+"""
 from __future__ import annotations
 
 import argparse
