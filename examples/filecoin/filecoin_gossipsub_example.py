@@ -93,8 +93,12 @@ async def run(
     # Build Filecoin gossipsub presets
     a_gossip = build_filecoin_gossipsub(network_name=network_name)
     b_gossip = build_filecoin_gossipsub(network_name=network_name)
-    a_pubsub = build_filecoin_pubsub(host=a_host, network_name=network_name, gossipsub=a_gossip)
-    b_pubsub = build_filecoin_pubsub(host=b_host, network_name=network_name, gossipsub=b_gossip)
+    a_pubsub = build_filecoin_pubsub(
+        host=a_host, network_name=network_name, gossipsub=a_gossip
+    )
+    b_pubsub = build_filecoin_pubsub(
+        host=b_host, network_name=network_name, gossipsub=b_gossip
+    )
 
     # Log mesh params table — traceable to parity_matrix
     mesh_info = {
