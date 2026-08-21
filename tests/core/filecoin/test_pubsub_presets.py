@@ -41,6 +41,32 @@ def test_build_filecoin_gossipsub_default_params() -> None:
     assert gossipsub.do_px is False
 
 
+def test_build_filecoin_gossipsub_mesh_details() -> None:
+    gossipsub = build_filecoin_gossipsub(network_name="testnetnet")
+    # Parity: node/modules/lp2p/pubsub.go:24
+    assert gossipsub.heartbeat_interval == 1
+    assert gossipsub.heartbeat_initial_delay == 0.1
+    assert gossipsub.gossip_window == 3
+    assert gossipsub.time_to_live == 60
+    assert gossipsub.gossip_history == 10  # via mcache.history_size ==10
+    assert gossipsub.mcache.history_size == 10
+    assert [str(p) for p in gossipsub.protocols] == [
+        "/meshsub/2.0.0",
+        "/meshsub/1.2.0",
+        "/meshsub/1.1.0",
+        "/meshsub/1.0.0",
+    ]
+
+
+def test_filecoin_topic_score_reference_documented() -> None:
+    from libp2p.filecoin.pubsub import FILECOIN_TOPIC_SCORE_REFERENCE
+
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["blocks"]["topic_weight"] == 0.1
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["blocks"]["first_message_deliveries_weight"] == 5.0
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["messages"]["first_message_deliveries_weight"] == 0.5
+    assert FILECOIN_TOPIC_SCORE_REFERENCE["drand"]["topic_weight"] == 0.5
+
+
 def test_build_filecoin_gossipsub_bootstrapper_params() -> None:
     gossipsub = build_filecoin_gossipsub(
         network_name="testnetnet",
