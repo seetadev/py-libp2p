@@ -78,7 +78,7 @@ async def decode_uvarint_from_stream(reader: Reader) -> int:
 
         res += (value & LOW_MASK) << shift
 
-        if not value & HIGH_MASK:
+        if not (value & HIGH_MASK):
             break
     return res
 
