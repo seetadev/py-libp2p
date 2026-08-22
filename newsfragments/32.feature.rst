@@ -1,0 +1,1 @@
+Configured the pubsub chat example's GossipSub instance with Filecoin/Lotus-style mesh parameters (degree=8, degree_low=6, degree_high=12, gossip_history=10) and added a basic message validator enforcing a maximum message size.

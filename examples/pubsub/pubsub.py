@@ -41,6 +41,16 @@ logging.basicConfig(
 logger = logging.getLogger("pubsub-demo")
 CHAT_TOPIC = "pubsub-chat"
 GOSSIPSUB_PROTOCOL_ID = TProtocol("/meshsub/1.0.0")
+def message_validator(peer_id, msg) -> bool:
+    "A validitor like Filecoin which rejects empty messages or messages above 1MiB"
+    data= msg.data
+    if len(data) == 0:
+        logger.warning(f"Rejected empty message from {peer_id}")
+        return False
+    if len(data) > 1024 * 1024:
+        logger.warning(f"Rejected oversized message from {peer_id}")
+        return False
+    return True
 
 # Generate a key pair for the node
 key_pair = create_new_key_pair()
@@ -93,6 +103,7 @@ async def monitor_peer_topics(pubsub, nursery, termination_event):
         for topic in pubsub.peer_topics.keys():
             if topic not in subscribed_topics:
                 logger.info(f"Auto-subscribing to new topic: {topic}")
+                pubsub.set_topic_validator(topic, message_validator, False)
                 subscription = await pubsub.subscribe(topic)
                 subscribed_topics.add(topic)
                 # Start a receive loop for this topic
@@ -128,13 +139,13 @@ async def run(topic: str, destination: str | None, port: int | None) -> None:
     # Create and start gossipsub with optimized parameters for testing
     gossipsub = GossipSub(
         protocols=[GOSSIPSUB_PROTOCOL_ID],
-        degree=3,  # Number of peers to maintain in mesh
-        degree_low=2,  # Lower bound for mesh peers
-        degree_high=4,  # Upper bound for mesh peers
+        degree=8,  # Number of peers to maintain in mesh
+        degree_low=6,  # Lower bound for mesh peers
+        degree_high=12,  # Upper bound for mesh peers
         direct_peers=None,  # Direct peers
         time_to_live=60,  # TTL for message cache in seconds
         gossip_window=2,  # Smaller window for faster gossip
-        gossip_history=5,  # Keep more history
+        gossip_history=10,  # Keep more history
         heartbeat_initial_delay=2.0,  # Start heartbeats sooner
         heartbeat_interval=5,  # More frequent heartbeats for testing
     )
@@ -154,6 +165,7 @@ async def run(topic: str, destination: str | None, port: int | None) -> None:
                 logger.info("Pubsub ready.")
 
                 # Subscribe to the topic
+                pubsub.set_topic_validator(topic, message_validator, False)
                 subscription = await pubsub.subscribe(topic)
                 logger.info(f"Subscribed to topic: {topic}")
 
