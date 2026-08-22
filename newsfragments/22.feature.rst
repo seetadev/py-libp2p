@@ -1,0 +1,1 @@
+Added decentralized federated learning aggregation protocols to ``libp2p.federated``, including deterministic round-robin leader rotation (``RoundRobinAggregator``), continuous asynchronous gossip averaging (``GossipAggregator``), safe JSON model payload serialization (``ModelPayload``).

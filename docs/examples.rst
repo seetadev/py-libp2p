@@ -41,3 +41,4 @@ Examples
    examples.path_handling
    examples.metrics
    examples.multi_transport
+   examples.decentralized_aggregation
