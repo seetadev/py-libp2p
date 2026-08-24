@@ -1,0 +1,27 @@
+PROTOCOL_ID = "/sea-lion-multi-agent/1.0.0"
+
+AGENT1_ID = "agent1"
+AGENT2_ID = "agent2"
+AGENT3_ID = "agent3"
+
+AGENT1_NAME = "Agent-1"
+AGENT2_NAME = "Agent-2"
+AGENT3_NAME = "Agent-3"
+
+AGENT1_PORT = 9101
+AGENT2_PORT = 9102
+AGENT3_PORT = 9103
+
+ORCHESTRATOR_MODEL = "aisingapore/Llama-SEA-LION-v3.5-8B-R:latest"
+AGENT_MODEL = "gemma3:1b"
+
+OLLAMA_API_BASE = "http://127.0.0.1:11434"
+
+ETHERCALC_BASE_URL = "http://127.0.0.1:8000"
+ETHERCALC_ROOM = "sea-lion-agent-collaboration"
+
+LLM_TIMEOUT = 180
+P2P_TIMEOUT = 120
+CONNECTION_TIMEOUT = 20
+MAX_ORCHESTRATION_TURNS = 6
+MAX_FRAME_SIZE = 4 * 1024 * 1024
