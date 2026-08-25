@@ -1,0 +1,5 @@
+httpx
+multiaddr
+trio
+litellm
+git+https://github.com/libp2p/py-libp2p.git
