@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-p2p"
+version = "0.1.0"
+description = "Decentralized multi-agent application over py-libp2p with SeaLion-style orchestration, LiteLLM, and EtherCalc"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "libp2p>=0.2.0",
+    "trio>=0.26.0",
+    "multiaddr>=0.0.9",
+    "litellm>=1.44.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.6.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0", "pytest-trio>=0.8.0"]
+
+[tool.pytest.ini_options]
+trio_mode = true
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["agentic_p2p*"]

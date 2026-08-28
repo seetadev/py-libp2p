@@ -1,0 +1,14 @@
+libp2p>=0.2.0
+trio>=0.26.0
+multiaddr>=0.0.9
+litellm>=1.44.0
+httpx>=0.27.0
+pydantic>=2.6.0
+python-dotenv>=1.0.1
+
+# Optional: install the real SeaLion package if/when you have confirmed its
+# current API. workflow.py will use it automatically if it's importable.
+# sealion
+
+pytest>=8.0.0
+pytest-trio>=0.8.0

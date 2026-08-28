@@ -1,0 +1,6 @@
+libp2p
+trio
+scikit-learn
+numpy
+pytest
+pytest-trio
