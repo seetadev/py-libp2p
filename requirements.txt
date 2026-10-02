@@ -1,0 +1,4 @@
+py-libp2p
+litellm
+requests
+pydantic
