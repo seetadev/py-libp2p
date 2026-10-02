@@ -1,0 +1,3 @@
+httpx>=0.24.0
+py-libp2p>=0.1.0
+mypy
