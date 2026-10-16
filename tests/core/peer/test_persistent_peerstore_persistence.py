@@ -11,7 +11,10 @@ import tempfile
 import pytest
 from multiaddr import Multiaddr
 
+from libp2p.crypto.ed25519 import create_new_key_pair
+from libp2p.peer.envelope import seal_record
 from libp2p.peer.id import ID
+from libp2p.peer.peer_record import PeerRecord
 from libp2p.peer.peerstore import PeerStoreError
 from libp2p.peer.persistent import (
     create_async_leveldb_peerstore,
@@ -471,3 +474,96 @@ def test_sync_cross_backend_no_persistence():
         addrs = sqlite_store.addrs(peer_id)
         assert len(addrs) == 0
         sqlite_store.close()
+
+
+# ============================================================================
+# Signed Peer Record (Certified Address Book) Persistence Tests
+# ============================================================================
+
+
+def test_sync_sqlite_peer_record_persistence():
+    """Test that signed peer records survive a peerstore restart."""
+    key_pair = create_new_key_pair()
+    peer_id = ID.from_pubkey(key_pair.public_key)
+    addrs = [Multiaddr("/ip4/127.0.0.1/tcp/9000"), Multiaddr("/ip4/127.0.0.1/tcp/9001")]
+    record = PeerRecord(peer_id, addrs, seq=42)
+    envelope = seal_record(record, key_pair.private_key)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test.db"
+
+        store1 = create_sync_sqlite_peerstore(str(db_path))
+        assert store1.consume_peer_record(envelope, ttl=3600) is True
+        store1.close()
+
+        store2 = create_sync_sqlite_peerstore(str(db_path))
+        restored = store2.get_peer_record(peer_id)
+        assert restored is not None
+        assert restored.record().seq == 42
+        assert set(restored.record().addrs) == set(addrs)
+        store2.close()
+
+
+def test_sync_memory_peer_record_not_persistent():
+    """Test that signed peer records are not persisted in the memory backend."""
+    key_pair = create_new_key_pair()
+    peer_id = ID.from_pubkey(key_pair.public_key)
+    addrs = [Multiaddr("/ip4/127.0.0.1/tcp/9000")]
+    record = PeerRecord(peer_id, addrs, seq=1)
+    envelope = seal_record(record, key_pair.private_key)
+
+    store1 = create_sync_memory_peerstore()
+    assert store1.consume_peer_record(envelope, ttl=3600) is True
+    store1.close()
+
+    store2 = create_sync_memory_peerstore()
+    assert store2.get_peer_record(peer_id) is None
+    store2.close()
+
+
+def test_sync_sqlite_peer_record_seq_ordering_survives_restart():
+    """Older records are still rejected after a restart."""
+    key_pair = create_new_key_pair()
+    peer_id = ID.from_pubkey(key_pair.public_key)
+    addrs = [Multiaddr("/ip4/127.0.0.1/tcp/9000")]
+
+    new_record = PeerRecord(peer_id, addrs, seq=10)
+    new_envelope = seal_record(new_record, key_pair.private_key)
+
+    old_record = PeerRecord(peer_id, [Multiaddr("/ip4/10.0.0.1/tcp/4001")], seq=5)
+    old_envelope = seal_record(old_record, key_pair.private_key)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test.db"
+
+        store1 = create_sync_sqlite_peerstore(str(db_path))
+        store1.consume_peer_record(new_envelope, ttl=3600)
+        store1.close()
+
+        store2 = create_sync_sqlite_peerstore(str(db_path))
+        assert store2.consume_peer_record(old_envelope, ttl=3600) is False
+        store2.close()
+
+
+@pytest.mark.trio
+async def test_async_sqlite_peer_record_persistence():
+    """Test that signed peer records survive a peerstore restart (async)."""
+    key_pair = create_new_key_pair()
+    peer_id = ID.from_pubkey(key_pair.public_key)
+    addrs = [Multiaddr("/ip4/127.0.0.1/tcp/9000"), Multiaddr("/ip4/127.0.0.1/tcp/9001")]
+    record = PeerRecord(peer_id, addrs, seq=42)
+    envelope = seal_record(record, key_pair.private_key)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        db_path = Path(temp_dir) / "test.db"
+
+        store1 = create_async_sqlite_peerstore(str(db_path))
+        assert await store1.consume_peer_record_async(envelope, ttl=3600) is True
+        await store1.close_async()
+
+        store2 = create_async_sqlite_peerstore(str(db_path))
+        restored = await store2.get_peer_record_async(peer_id)
+        assert restored is not None
+        assert restored.record().seq == 42
+        assert set(restored.record().addrs) == set(addrs)
+        await store2.close_async()
